@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -42,7 +43,7 @@ class InstallerTests(unittest.TestCase):
             bin_dir.mkdir()
             python = bin_dir / "python"
             command = bin_dir / "agent-chat-session-sync"
-            python.touch()
+            python.symlink_to(Path(sys.executable))
             command.touch(mode=0o755)
             with mock.patch("agent_chat_session_sync.installer.sys.executable", str(python)), mock.patch(
                 "agent_chat_session_sync.installer.shutil.which", return_value=None

@@ -25,9 +25,11 @@ def default_hooks_path() -> Path:
 
 
 def installed_executable() -> str | None:
-    adjacent = Path(sys.executable).resolve().parent / "agent-chat-session-sync"
+    # Keep the venv path itself: its Python is commonly a symlink to a global
+    # interpreter, while the console-script entry point lives beside the link.
+    adjacent = Path(sys.executable).parent / "agent-chat-session-sync"
     if adjacent.is_file() and os.access(adjacent, os.X_OK):
-        return str(adjacent)
+        return str(adjacent.resolve())
     return shutil.which("agent-chat-session-sync")
 
 
