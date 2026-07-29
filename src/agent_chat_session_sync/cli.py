@@ -1,0 +1,328 @@
+from __future__ import annotations
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+
+from . import __version__
+from .acceptance import LiveAcceptance
+from .bridges.cc_connect import CCConnectBridge
+from .config import Settings, load_cc_connect_config
+from .installer import (
+    install_codex_hooks,
+    install_worker_service,
+    uninstall_codex_hooks,
+    uninstall_worker_service,
+)
+from .models import Binding
+from .permissions import codex_permission_config_checks, socket_security_checks
+from .runtime import hook_main, make_logger
+from .provenance import current_provenance, provenance_json, source_head
+from .queue import EventDatabase
+from .worker import EventWorker
+
+
+def _doctor(settings: Settings) -> int:
+    checks = [
+        ("cc-connect config", settings.cc_config.is_file(), str(settings.cc_config)),
+        ("cc-connect socket", settings.cc_socket.exists(), str(settings.cc_socket)),
+        ("Codex sessions", (settings.codex_home / "sessions").is_dir(), str(settings.codex_home / "sessions")),
+    ]
+    try:
+        config = load_cc_connect_config(settings.cc_config)
+        projects = config.get("projects", [])
+        configured = any(
+            any(platform.get("type") == "feishu" for platform in project.get("platforms", [])) for project in projects
+        )
+    except Exception:
+        configured = False
+    checks.append(("Feishu project", configured, "at least one cc-connect project"))
+    attach = CCConnectBridge(settings.cc_socket).supports_attach() if settings.cc_socket.exists() else False
+    checks.append(("bind-agent extension", attach, "POST /sessions/bind-agent"))
+    try:
+        EventDatabase(settings.database_path)
+        database_ok = True
+        database_detail = str(settings.database_path)
+    except Exception as exc:
+        database_ok = False
+        database_detail = str(exc)
+    checks.append(("durable SQLite queue", database_ok, database_detail))
+    provenance = current_provenance()
+    checks.append(
+        ("stamped package", provenance.git_commit not in {"UNSTAMPED", "UNKNOWN", ""}, provenance.git_commit)
+    )
+    if sys.platform == "darwin":
+        service = subprocess.run(
+            ["launchctl", "print", f"gui/{os.getuid()}/com.agent-chat-session-sync.worker"],
+            text=True,
+            capture_output=True,
+        )
+        checks.append(("durable worker service", service.returncode == 0, "LaunchAgent running"))
+    for check in socket_security_checks("cc-connect socket", settings.cc_socket):
+        checks.append((check.name, check.okay, check.detail))
+    if configured:
+        for check in codex_permission_config_checks(config):
+            checks.append((check.name, check.okay, check.detail))
+        daemon_projects = [
+            project
+            for project in config.get("projects", [])
+            if str(project.get("agent", {}).get("options", {}).get("app_server_lifecycle", "")).lower()
+            in {"daemon", "shared", "persistent"}
+        ]
+        if daemon_projects:
+            configured_socket = next(
+                (
+                    Path(project.get("agent", {}).get("options", {}).get("app_server_socket", "")).expanduser()
+                    for project in daemon_projects
+                    if project.get("agent", {}).get("options", {}).get("app_server_socket")
+                ),
+                settings.codex_app_server_socket,
+            )
+            for check in socket_security_checks("Codex App Server socket", configured_socket):
+                checks.append((check.name, check.okay, check.detail))
+    for name, okay, detail in checks:
+        print(f"{'OK' if okay else 'FAIL':4}  {name}: {detail}")
+    return 0 if all(okay for _, okay, _ in checks) else 1
+
+
+def _status(settings: Settings) -> int:
+    database = EventDatabase(settings.database_path)
+    stats = database.stats()
+    print(f"database: {settings.database_path}")
+    for key in sorted(stats):
+        print(f"{key}: {stats[key]}")
+    return 0
+
+
+def _events(settings: Settings, limit: int) -> int:
+    for event in EventDatabase(settings.database_path).list_events(limit):
+        print(
+            f"{event.id:6} {event.state:20} attempts={event.attempts:<3} "
+            f"rollout={event.rollout_id or '-'} method={event.resolution_method or '-'} "
+            f"error={event.last_error[:120] or '-'}"
+        )
+        if event.candidates:
+            print("       candidates=" + json.dumps(event.candidates, ensure_ascii=False))
+    return 0
+
+
+def _resolve_event(settings: Settings, event_id: int, rollout_id: str, rollout_path: Path | None) -> int:
+    path = rollout_path
+    if path is None:
+        try:
+            path = next((settings.codex_home / "sessions").glob(f"**/*{rollout_id}.jsonl"))
+        except StopIteration:
+            print(f"rollout not found: {rollout_id}", file=sys.stderr)
+            return 1
+    EventDatabase(settings.database_path).force_resolution(event_id, rollout_id.lower(), str(path.resolve()))
+    print(f"resolved inbox={event_id} rollout={rollout_id} path={path}")
+    return 0
+
+
+def _hook_provenance(path: Path) -> dict[str, str]:
+    document = json.loads(path.read_text(encoding="utf-8"))
+    command = ""
+    for entries in document.get("hooks", {}).values():
+        for entry in entries:
+            for hook in entry.get("hooks", []):
+                candidate = str(hook.get("command", ""))
+                if "agent-chat-session-sync" in candidate or "agent_chat_session_sync" in candidate:
+                    command = candidate
+                    break
+            if command:
+                break
+        if command:
+            break
+    if not command:
+        raise RuntimeError(f"installed Hook command not found in {path}")
+    parts = shlex.split(command)
+    if "-m" in parts and "agent_chat_session_sync" in parts:
+        probe = parts[: parts.index("agent_chat_session_sync") + 1] + ["provenance", "--json"]
+    else:
+        probe = [parts[0], "provenance", "--json"]
+    result = subprocess.run(probe, check=True, text=True, capture_output=True)
+    return json.loads(result.stdout)
+
+
+def _verify_install(source: Path, expected_commit: str, hooks_file: Path | None = None) -> int:
+    source = source.resolve()
+    head = source_head(source)
+    dirty = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=source, text=True, capture_output=True, check=True
+    ).stdout.strip()
+    installed = current_provenance().to_dict()
+    hook = _hook_provenance(hooks_file or (Path.home() / ".codex/hooks.json"))
+    expected = expected_commit or head
+    checks = provenance_checks(head, dirty, expected, installed, hook)
+    for name, okay, detail in checks:
+        print(f"{'OK' if okay else 'FAIL':4}  {name}: {detail}")
+    return 0 if all(check[1] for check in checks) else 1
+
+
+def provenance_checks(
+    head: str,
+    dirty: str,
+    expected: str,
+    installed: dict[str, str],
+    hook: dict[str, str],
+) -> list[tuple[str, bool, str]]:
+    return [
+        ("source repository clean", not dirty, "clean" if not dirty else "working tree has uncommitted changes"),
+        ("source commit", head == expected, f"source={head} expected={expected}"),
+        ("built package commit", installed["git_commit"] == expected, f"package={installed['git_commit']}"),
+        ("Hook imported commit", hook.get("git_commit") == expected, f"hook={hook.get('git_commit')}"),
+        (
+            "Hook package path",
+            hook.get("package_path") == installed["package_path"],
+            f"hook={hook.get('package_path')} verifier={installed['package_path']}",
+        ),
+        (
+            "Hook Python path",
+            hook.get("python_path") == installed["python_path"],
+            f"hook={hook.get('python_path')} verifier={installed['python_path']}",
+        ),
+    ]
+
+
+def _migrate_state(settings: Settings, source: Path) -> int:
+    source_state = json.loads(source.expanduser().read_text(encoding="utf-8"))
+    config = load_cc_connect_config(settings.cc_config)
+    bridge = CCConnectBridge(settings.cc_socket)
+    migrated = 0
+    skipped = 0
+    from .config import matching_project
+
+    database = EventDatabase(settings.database_path)
+    for session_id, raw in source_state.get("sessions", {}).items():
+        binding = Binding.from_dict(raw)
+        project = matching_project(config, binding.cwd)
+        if project is None or not binding.chat_id or not binding.session_key or not Path(binding.cwd).is_dir():
+            skipped += 1
+            continue
+        name = f"Codex · {Path(binding.cwd).name} · {session_id[:8]}"
+        bridge.attach_agent_session(project.name, binding.session_key, session_id, name, binding.cwd)
+        database.put_binding(
+            session_id,
+            Binding(
+                chat_id=binding.chat_id,
+                session_key=binding.session_key,
+                project=project.name,
+                cwd=binding.cwd,
+                generation=binding.generation,
+                created_at=binding.created_at,
+                title=binding.title,
+            ),
+        )
+        migrated += 1
+    print(f"migrated: {migrated}; skipped: {skipped}; destination: {settings.database_path}")
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="agent-chat-session-sync")
+    parser.add_argument("--version", action="version", version=__version__)
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("hook", help="consume one Codex hook event from stdin")
+    worker = subparsers.add_parser("worker", help="process the durable event queue")
+    worker.add_argument("--once", action="store_true")
+    worker.add_argument("--poll-interval", type=float, default=1.0)
+    install = subparsers.add_parser("install-hooks", help="install or update Codex hooks")
+    install.add_argument("--hooks-file", type=Path)
+    uninstall = subparsers.add_parser("uninstall-hooks", help="remove this project's Codex hooks")
+    uninstall.add_argument("--hooks-file", type=Path)
+    subparsers.add_parser("install-service", help="install and start the durable worker service")
+    subparsers.add_parser("uninstall-service", help="stop and remove the durable worker service")
+    subparsers.add_parser("doctor", help="check local prerequisites and the cc-connect extension")
+    subparsers.add_parser("status", help="show local bindings without exposing chat or user IDs")
+    events = subparsers.add_parser("events", help="show recent durable inbox states")
+    events.add_argument("--limit", type=int, default=50)
+    resolve = subparsers.add_parser("resolve", help="manually confirm an ambiguous inbox event")
+    resolve.add_argument("event_id", type=int)
+    resolve.add_argument("rollout_id")
+    resolve.add_argument("--rollout-path", type=Path)
+    retry = subparsers.add_parser("retry", help="retry a non-delivered historical event immediately")
+    retry.add_argument("event_id", type=int)
+    provenance = subparsers.add_parser("provenance", help="show the imported package build identity")
+    provenance.add_argument("--json", action="store_true")
+    verify = subparsers.add_parser("verify-install", help="prove source, build and Hook identities match")
+    verify.add_argument("--source", type=Path, required=True)
+    verify.add_argument("--expected-commit", default="")
+    verify.add_argument("--hooks-file", type=Path)
+    acceptance = subparsers.add_parser("acceptance-live", help="run the real Codex/Hook/Feishu acceptance flow")
+    acceptance.add_argument("--timeout", type=float, default=300)
+    acceptance.add_argument("--keep-resources", action="store_true")
+    acceptance.add_argument(
+        "--skip-reply",
+        action="store_true",
+        help="diagnostic only: do not verify Feishu reply resumes the same rollout",
+    )
+    migrate = subparsers.add_parser("migrate-state", help="reattach bindings from a legacy state file")
+    migrate.add_argument("--from", dest="source", type=Path, required=True)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.command == "hook":
+        return hook_main()
+    if args.command == "provenance":
+        if args.json:
+            print(provenance_json())
+        else:
+            for key, value in current_provenance().to_dict().items():
+                print(f"{key}: {value}")
+        return 0
+    if args.command == "install-hooks":
+        print(f"installed hooks: {install_codex_hooks(args.hooks_file)}")
+        return 0
+    if args.command == "uninstall-hooks":
+        print(f"removed hooks: {uninstall_codex_hooks(args.hooks_file)}")
+        return 0
+    settings = Settings.from_env()
+    if args.command == "worker":
+        worker = EventWorker(settings, make_logger(settings.worker_log_path))
+        if args.once:
+            return 0 if worker.run_once() else 3
+        worker.run_forever(args.poll_interval)
+        return 0
+    if args.command == "install-service":
+        print(f"installed worker: {install_worker_service(settings.data_dir)}")
+        return 0
+    if args.command == "uninstall-service":
+        print(f"removed worker: {uninstall_worker_service()}")
+        return 0
+    if args.command == "doctor":
+        return _doctor(settings)
+    if args.command == "status":
+        return _status(settings)
+    if args.command == "events":
+        return _events(settings, args.limit)
+    if args.command == "resolve":
+        return _resolve_event(settings, args.event_id, args.rollout_id, args.rollout_path)
+    if args.command == "retry":
+        okay = EventDatabase(settings.database_path).retry_now(args.event_id)
+        print(f"{'scheduled' if okay else 'not scheduled'} inbox={args.event_id}")
+        return 0 if okay else 1
+    if args.command == "verify-install":
+        return _verify_install(args.source, args.expected_commit, args.hooks_file)
+    if args.command == "acceptance-live":
+        result = LiveAcceptance(settings, make_logger(settings.worker_log_path)).run(
+            timeout=args.timeout,
+            keep_resources=args.keep_resources,
+            skip_reply=args.skip_reply,
+        )
+        print(json.dumps(result.__dict__, ensure_ascii=False, sort_keys=True))
+        if args.skip_reply:
+            print("DIAGNOSTIC ONLY: Feishu → same rollout was not verified.", file=sys.stderr)
+        return 0
+    if args.command == "migrate-state":
+        return _migrate_state(settings, args.source)
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

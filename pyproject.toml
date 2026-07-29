@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-chat-session-sync"
+version = "0.3.0"
+description = "Attach local AI-agent sessions to dedicated chat groups through cc-connect"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "agent-chat-session-sync contributors" }]
+keywords = ["codex", "cc-connect", "feishu", "lark", "session-sync"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Communications :: Chat",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["build>=1.2", "pytest>=8"]
+
+[project.scripts]
+agent-chat-session-sync = "agent_chat_session_sync.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

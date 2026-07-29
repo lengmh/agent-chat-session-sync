@@ -1,0 +1,645 @@
+diff --git a/agent/codex/appserver_session.go b/agent/codex/appserver_session.go
+index 0eaa99e..4567a21 100644
+--- a/agent/codex/appserver_session.go
++++ b/agent/codex/appserver_session.go
+@@ -141,16 +141,19 @@ type appServerRequestUserInputAnswer struct {
+ }
+ 
+ type appServerSession struct {
+-	url            string
+-	workDir        string
+-	model          string
+-	effort         string
+-	mode           string
+-	baseURL        string
+-	modelProvider  string
+-	extraEnv       []string
+-	codexHome      string
+-	promptPreamble string
++	url               string
++	lifecycle         string
++	socketPath        string
++	permissionProfile string
++	workDir           string
++	model             string
++	effort            string
++	mode              string
++	baseURL           string
++	modelProvider     string
++	extraEnv          []string
++	codexHome         string
++	promptPreamble    string
+ 
+ 	events chan core.Event
+ 
+@@ -191,25 +194,28 @@ const (
+ 	appServerUsageRefreshTimeout = 1500 * time.Millisecond
+ )
+ 
+-func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
++func newAppServerSession(ctx context.Context, url, lifecycle, socketPath, permissionProfile, workDir, model, effort, mode, resumeID, baseURL, modelProvider string, extraEnv []string, codexHome string, systemPrompt string, appendPrompt string) (*appServerSession, error) {
+ 	sessionCtx, cancel := context.WithCancel(ctx)
+ 	s := &appServerSession{
+-		url:              url,
+-		workDir:          workDir,
+-		model:            model,
+-		effort:           effort,
+-		mode:             mode,
+-		baseURL:          baseURL,
+-		modelProvider:    modelProvider,
+-		extraEnv:         append([]string(nil), extraEnv...),
+-		codexHome:        strings.TrimSpace(codexHome),
+-		promptPreamble:   buildCodexPromptPreamble(systemPrompt, appendPrompt),
+-		events:           make(chan core.Event, 128),
+-		ctx:              sessionCtx,
+-		cancel:           cancel,
+-		pending:          make(map[int64]chan rpcResponseEnvelope),
+-		pendingApprovals: make(map[string]chan core.PermissionResult),
+-		preambleSent:     resumeID != "" && resumeID != core.ContinueSession,
++		url:               url,
++		lifecycle:         lifecycle,
++		socketPath:        strings.TrimSpace(socketPath),
++		permissionProfile: strings.TrimSpace(permissionProfile),
++		workDir:           workDir,
++		model:             model,
++		effort:            effort,
++		mode:              mode,
++		baseURL:           baseURL,
++		modelProvider:     modelProvider,
++		extraEnv:          append([]string(nil), extraEnv...),
++		codexHome:         strings.TrimSpace(codexHome),
++		promptPreamble:    buildCodexPromptPreamble(systemPrompt, appendPrompt),
++		events:            make(chan core.Event, 128),
++		ctx:               sessionCtx,
++		cancel:            cancel,
++		pending:           make(map[int64]chan rpcResponseEnvelope),
++		pendingApprovals:  make(map[string]chan core.PermissionResult),
++		preambleSent:      resumeID != "" && resumeID != core.ContinueSession,
+ 	}
+ 	s.alive.Store(true)
+ 
+@@ -222,6 +228,10 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
+ 		_ = s.Close()
+ 		return nil, err
+ 	}
++	if err := s.verifyPermissionProfile(); err != nil {
++		_ = s.Close()
++		return nil, err
++	}
+ 
+ 	if err := s.ensureThread(resumeID); err != nil {
+ 		_ = s.Close()
+@@ -235,9 +245,9 @@ func newAppServerSession(ctx context.Context, url, workDir, model, effort, mode,
+ }
+ 
+ func (s *appServerSession) connect() error {
+-	args := []string{"app-server"}
+-	if strings.TrimSpace(s.url) != "" {
+-		args = append(args, "--listen", strings.TrimSpace(s.url))
++	args, err := appServerCommandArgs(s.lifecycle, s.url, s.socketPath)
++	if err != nil {
++		return err
+ 	}
+ 	if model := strings.TrimSpace(s.model); model != "" {
+ 		args = append(args, "-c", fmt.Sprintf("model=%q", model))
+@@ -282,7 +292,7 @@ func (s *appServerSession) connect() error {
+ 	s.stdin = stdin
+ 	s.procMu.Unlock()
+ 
+-	slog.Info("codex app-server session started", "transport", "stdio", "pid", cmd.Process.Pid, "work_dir", s.workDir)
++	slog.Info("codex app-server session started", "lifecycle", s.lifecycle, "pid", cmd.Process.Pid, "work_dir", s.workDir)
+ 
+ 	s.wg.Add(3)
+ 	go s.readLoop(stdout)
+@@ -291,6 +301,21 @@ func (s *appServerSession) connect() error {
+ 	return nil
+ }
+ 
++func appServerCommandArgs(lifecycle, url, socketPath string) ([]string, error) {
++	if normalizeAppServerLifecycle(lifecycle) == "daemon" {
++		args := []string{"app-server", "proxy"}
++		if socket := strings.TrimSpace(socketPath); socket != "" {
++			args = append(args, "--sock", socket)
++		}
++		return args, nil
++	}
++	transport := strings.TrimSpace(url)
++	if transport == "" || strings.EqualFold(transport, "stdio") || strings.EqualFold(transport, "stdio://") {
++		return []string{"app-server", "--stdio"}, nil
++	}
++	return nil, fmt.Errorf("codex app-server: lifecycle=stdio requires app_server_url=stdio://; use app_server_lifecycle=daemon for a shared control socket")
++}
++
+ func (s *appServerSession) initialize() error {
+ 	params := map[string]any{
+ 		"clientInfo": map[string]any{
+@@ -321,6 +346,45 @@ func (s *appServerSession) initialize() error {
+ 	return nil
+ }
+ 
++type permissionProfileListResponse struct {
++	Data []struct {
++		ID      string `json:"id"`
++		Allowed bool   `json:"allowed"`
++	} `json:"data"`
++	NextCursor *string `json:"nextCursor"`
++}
++
++func (s *appServerSession) verifyPermissionProfile() error {
++	profile := strings.TrimSpace(s.permissionProfile)
++	if profile == "" {
++		return nil
++	}
++	var cursor *string
++	for {
++		params := map[string]any{"cwd": s.GetWorkDir()}
++		if cursor != nil {
++			params["cursor"] = *cursor
++		}
++		var resp permissionProfileListResponse
++		if err := s.request("permissionProfile/list", params, &resp); err != nil {
++			return fmt.Errorf("codex app-server permission profile discovery: %w", err)
++		}
++		for _, candidate := range resp.Data {
++			if candidate.ID == profile {
++				if !candidate.Allowed {
++					return fmt.Errorf("codex app-server permission profile %q is denied by effective requirements for %s", profile, s.GetWorkDir())
++				}
++				return nil
++			}
++		}
++		if resp.NextCursor == nil || strings.TrimSpace(*resp.NextCursor) == "" {
++			break
++		}
++		cursor = resp.NextCursor
++	}
++	return fmt.Errorf("codex app-server permission profile %q is not available for %s", profile, s.GetWorkDir())
++}
++
+ func (s *appServerSession) ensureThread(resumeID string) error {
+ 	if resumeID != "" && resumeID != core.ContinueSession {
+ 		params := s.threadRequestParams()
+@@ -357,11 +421,15 @@ func (s *appServerSession) threadRequestParams() map[string]any {
+ 	params := map[string]any{
+ 		"experimentalRawEvents":  false,
+ 		"persistExtendedHistory": false,
++		"cwd":                    s.GetWorkDir(),
++		"serviceName":            "cc-connect-session-sync",
+ 	}
+ 	if model := s.GetModel(); model != "" {
+ 		params["model"] = model
+ 	}
+-	if approval, sandbox := appServerModeSettings(s.mode); approval != "" {
++	if profile := strings.TrimSpace(s.permissionProfile); profile != "" {
++		params["permissions"] = profile
++	} else if approval, sandbox := appServerModeSettings(s.mode); approval != "" {
+ 		params["approvalPolicy"] = approval
+ 		if sandbox != "" {
+ 			params["sandbox"] = sandbox
+@@ -491,7 +559,7 @@ func (s *appServerSession) Send(prompt string, images []core.ImageAttachment, fi
+ 	if effort := s.GetReasoningEffort(); effort != "" {
+ 		params["effort"] = effort
+ 	}
+-	if approval, _ := appServerModeSettings(s.mode); approval != "" {
++	if approval, _ := appServerModeSettings(s.mode); approval != "" && strings.TrimSpace(s.permissionProfile) == "" {
+ 		params["approvalPolicy"] = approval
+ 	}
+ 
+diff --git a/agent/codex/appserver_session_test.go b/agent/codex/appserver_session_test.go
+index 7038e58..eef856a 100644
+--- a/agent/codex/appserver_session_test.go
++++ b/agent/codex/appserver_session_test.go
+@@ -30,6 +30,58 @@ func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
+ 	}
+ }
+ 
++func TestAppServerCommandArgs(t *testing.T) {
++	tests := []struct {
++		name, lifecycle, url, socket string
++		want                         []string
++		wantErr                      bool
++	}{
++		{name: "stdio", lifecycle: "stdio", url: "stdio://", want: []string{"app-server", "--stdio"}},
++		{name: "daemon default socket", lifecycle: "daemon", want: []string{"app-server", "proxy"}},
++		{name: "daemon explicit socket", lifecycle: "daemon", socket: "/run/user/501/codex.sock", want: []string{"app-server", "proxy", "--sock", "/run/user/501/codex.sock"}},
++		{name: "reject websocket with stdio connector", lifecycle: "stdio", url: "ws://127.0.0.1:3845", wantErr: true},
++	}
++	for _, tt := range tests {
++		t.Run(tt.name, func(t *testing.T) {
++			got, err := appServerCommandArgs(tt.lifecycle, tt.url, tt.socket)
++			if (err != nil) != tt.wantErr {
++				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
++			}
++			if strings.Join(got, "\x00") != strings.Join(tt.want, "\x00") {
++				t.Fatalf("args = %#v, want %#v", got, tt.want)
++			}
++		})
++	}
++}
++
++func TestAppServerThreadRequestParamsPermissionProfileIsMutuallyExclusive(t *testing.T) {
++	s := &appServerSession{workDir: "/tmp/project", mode: "yolo", permissionProfile: "workspace-safe"}
++	params := s.threadRequestParams()
++	if params["permissions"] != "workspace-safe" {
++		t.Fatalf("permissions = %#v", params["permissions"])
++	}
++	if _, exists := params["sandbox"]; exists {
++		t.Fatal("sandbox must not be sent with permissions")
++	}
++	if _, exists := params["approvalPolicy"]; exists {
++		t.Fatal("approvalPolicy must not override a permission profile")
++	}
++	if params["cwd"] != "/tmp/project" {
++		t.Fatalf("cwd = %#v", params["cwd"])
++	}
++}
++
++func TestAppServerThreadRequestParamsLegacyFallback(t *testing.T) {
++	s := &appServerSession{workDir: "/tmp/project", mode: "auto-edit"}
++	params := s.threadRequestParams()
++	if _, exists := params["permissions"]; exists {
++		t.Fatal("legacy fallback must not send permissions")
++	}
++	if params["approvalPolicy"] != "never" || params["sandbox"] != "workspace-write" {
++		t.Fatalf("legacy settings = %#v", params)
++	}
++}
++
+ func TestAppServerSession_HandleRateLimitsUpdatedCachesUsage(t *testing.T) {
+ 	s := &appServerSession{}
+ 	raw, err := json.Marshal(appServerRateLimitsResponse{
+diff --git a/agent/codex/codex.go b/agent/codex/codex.go
+index 83fe4a8..281b3fa 100644
+--- a/agent/codex/codex.go
++++ b/agent/codex/codex.go
+@@ -33,22 +33,25 @@ func init() {
+ //   - "full-auto": --sandbox workspace-write + approval_policy=never
+ //   - "yolo":      --dangerously-bypass-approvals-and-sandbox
+ type Agent struct {
+-	workDir         string
+-	model           string
+-	reasoningEffort string
+-	mode            string // "suggest" | "auto-edit" | "full-auto" | "yolo"
+-	backend         string // "exec" | "app_server"
+-	appServerURL    string
+-	codexHome       string
+-	systemPrompt    string
+-	appendPrompt    string
+-	cmd             string   // CLI binary name, default "codex"
+-	cliExtraArgs    []string // extra args parsed from cmd after the binary
+-	providers       []core.ProviderConfig
+-	activeIdx       int      // -1 = no provider set
+-	configEnv       []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
+-	sessionEnv      []string
+-	mu              sync.RWMutex
++	workDir            string
++	model              string
++	reasoningEffort    string
++	mode               string // "suggest" | "auto-edit" | "full-auto" | "yolo"
++	backend            string // "exec" | "app_server"
++	appServerURL       string
++	appServerLifecycle string // "stdio" | "daemon"
++	appServerSocket    string
++	permissionProfile  string
++	codexHome          string
++	systemPrompt       string
++	appendPrompt       string
++	cmd                string   // CLI binary name, default "codex"
++	cliExtraArgs       []string // extra args parsed from cmd after the binary
++	providers          []core.ProviderConfig
++	activeIdx          int      // -1 = no provider set
++	configEnv          []string // env vars from [projects.agent.options.env] — persists across SetSessionEnv calls
++	sessionEnv         []string
++	mu                 sync.RWMutex
+ }
+ 
+ func New(opts map[string]any) (core.Agent, error) {
+@@ -61,12 +64,16 @@ func New(opts map[string]any) (core.Agent, error) {
+ 	mode, _ := opts["mode"].(string)
+ 	backend, _ := opts["backend"].(string)
+ 	appServerURL, _ := opts["app_server_url"].(string)
++	appServerLifecycle, _ := opts["app_server_lifecycle"].(string)
++	appServerSocket, _ := opts["app_server_socket"].(string)
++	permissionProfile, _ := opts["permission_profile"].(string)
+ 	codexHome, _ := opts["codex_home"].(string)
+ 	systemPrompt, _ := opts["system_prompt"].(string)
+ 	appendPrompt, _ := opts["append_system_prompt"].(string)
+ 	mode = normalizeMode(mode)
+ 	backend = normalizeBackend(backend)
+ 	appServerURL = normalizeAppServerURL(appServerURL)
++	appServerLifecycle = normalizeAppServerLifecycle(appServerLifecycle)
+ 
+ 	cmd, cliExtraArgs := core.ParseCmdOpts(opts, "codex")
+ 
+@@ -92,19 +99,22 @@ func New(opts map[string]any) (core.Agent, error) {
+ 	}
+ 
+ 	return &Agent{
+-		workDir:         workDir,
+-		model:           model,
+-		reasoningEffort: normalizeReasoningEffort(reasoningEffort),
+-		mode:            mode,
+-		backend:         backend,
+-		appServerURL:    appServerURL,
+-		codexHome:       strings.TrimSpace(codexHome),
+-		systemPrompt:    strings.TrimSpace(systemPrompt),
+-		appendPrompt:    strings.TrimSpace(appendPrompt),
+-		cmd:             cmd,
+-		cliExtraArgs:    cliExtraArgs,
+-		configEnv:       configEnv,
+-		activeIdx:       -1,
++		workDir:            workDir,
++		model:              model,
++		reasoningEffort:    normalizeReasoningEffort(reasoningEffort),
++		mode:               mode,
++		backend:            backend,
++		appServerURL:       appServerURL,
++		appServerLifecycle: appServerLifecycle,
++		appServerSocket:    strings.TrimSpace(appServerSocket),
++		permissionProfile:  strings.TrimSpace(permissionProfile),
++		codexHome:          strings.TrimSpace(codexHome),
++		systemPrompt:       strings.TrimSpace(systemPrompt),
++		appendPrompt:       strings.TrimSpace(appendPrompt),
++		cmd:                cmd,
++		cliExtraArgs:       cliExtraArgs,
++		configEnv:          configEnv,
++		activeIdx:          -1,
+ 	}, nil
+ }
+ 
+@@ -128,6 +138,15 @@ func normalizeAppServerURL(raw string) string {
+ 	return url
+ }
+ 
++func normalizeAppServerLifecycle(raw string) string {
++	switch strings.ToLower(strings.TrimSpace(raw)) {
++	case "daemon", "shared", "persistent":
++		return "daemon"
++	default:
++		return "stdio"
++	}
++}
++
+ func normalizeMode(raw string) string {
+ 	switch strings.ToLower(strings.TrimSpace(raw)) {
+ 	case "auto-edit", "autoedit", "auto_edit", "edit":
+@@ -311,7 +330,6 @@ func readCodexCachedModels() []core.ModelOption {
+ 	return parseCodexModelsJSON(b)
+ }
+ 
+-
+ // parseCodexModelsJSON parses a Codex models JSON file (model_catalog.json
+ // or models_cache.json) into a deduplicated, filtered slice of ModelOption.
+ // It is shared by readCodexCachedModels and readCodexModelCatalog.
+@@ -357,7 +375,6 @@ func parseCodexModelsJSON(data []byte) []core.ModelOption {
+ 	return models
+ }
+ 
+-
+ // readCodexModelCatalog reads $CODEX_HOME/config.toml to find the
+ // model_catalog_json setting, then reads and parses that JSON file.
+ // This is the authoritative source of model metadata for Codex CLI,
+@@ -426,6 +443,9 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
+ 	reasoningEffort := a.reasoningEffort
+ 	backend := a.backend
+ 	appServerURL := a.appServerURL
++	appServerLifecycle := a.appServerLifecycle
++	appServerSocket := a.appServerSocket
++	permissionProfile := a.permissionProfile
+ 	codexHome := a.codexHome
+ 	systemPrompt := a.systemPrompt
+ 	appendPrompt := a.appendPrompt
+@@ -459,7 +479,7 @@ func (a *Agent) StartSession(ctx context.Context, sessionID string) (core.AgentS
+ 	}
+ 
+ 	if backend == "app_server" {
+-		return newAppServerSession(ctx, appServerURL, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
++		return newAppServerSession(ctx, appServerURL, appServerLifecycle, appServerSocket, permissionProfile, workDir, model, reasoningEffort, mode, sessionID, baseURL, provName, extraEnv, codexHome, systemPrompt, appendPrompt)
+ 	}
+ 	if codexHome != "" {
+ 		extraEnv = append(extraEnv, "CODEX_HOME="+codexHome)
+@@ -527,6 +547,15 @@ func (a *Agent) WorkspaceAgentOptions() map[string]any {
+ 	if a.appServerURL != "" {
+ 		opts["app_server_url"] = a.appServerURL
+ 	}
++	if a.appServerLifecycle != "" {
++		opts["app_server_lifecycle"] = a.appServerLifecycle
++	}
++	if a.appServerSocket != "" {
++		opts["app_server_socket"] = a.appServerSocket
++	}
++	if a.permissionProfile != "" {
++		opts["permission_profile"] = a.permissionProfile
++	}
+ 	if a.codexHome != "" {
+ 		opts["codex_home"] = a.codexHome
+ 	}
+diff --git a/core/api.go b/core/api.go
+index 5443727..71394ed 100644
+--- a/core/api.go
++++ b/core/api.go
+@@ -91,6 +91,7 @@ func NewAPIServer(dataDir string) (*APIServer, error) {
+ 	}
+ 	s.mux.HandleFunc("/send", s.handleSend)
+ 	s.mux.HandleFunc("/sessions", s.handleSessions)
++	s.mux.HandleFunc("/sessions/bind-agent", s.handleBindAgentSession)
+ 	s.mux.HandleFunc("/cron/add", s.handleCronAdd)
+ 	s.mux.HandleFunc("/cron/list", s.handleCronList)
+ 	s.mux.HandleFunc("/cron/info", s.handleCronInfo)
+@@ -311,6 +312,115 @@ func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {
+ 	apiJSON(w, http.StatusOK, result)
+ }
+ 
++// BindAgentSessionRequest binds a platform conversation directly to an
++// existing native agent session. This is intentionally local-only: APIServer
++// listens on a mode-0600 Unix socket.
++type BindAgentSessionRequest struct {
++	Project     string `json:"project"`
++	SessionKey  string `json:"session_key"`
++	SessionID   string `json:"session_id"`
++	SessionName string `json:"session_name,omitempty"`
++	WorkDir     string `json:"work_dir,omitempty"`
++}
++
++func (s *APIServer) handleBindAgentSession(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodPost {
++		http.Error(w, "POST only", http.StatusMethodNotAllowed)
++		return
++	}
++
++	var req BindAgentSessionRequest
++	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
++		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
++		return
++	}
++	if strings.TrimSpace(req.SessionKey) == "" || strings.TrimSpace(req.SessionID) == "" {
++		http.Error(w, "session_key and session_id are required", http.StatusBadRequest)
++		return
++	}
++
++	s.mu.RLock()
++	engine, ok := s.engines[req.Project]
++	if req.Project == "" && len(s.engines) == 1 {
++		for _, candidate := range s.engines {
++			engine = candidate
++			ok = true
++		}
++	}
++	s.mu.RUnlock()
++	if !ok {
++		http.Error(w, fmt.Sprintf("project %q not found", req.Project), http.StatusNotFound)
++		return
++	}
++
++	name := strings.TrimSpace(req.SessionName)
++	if name == "" {
++		name = req.SessionID
++	}
++	agent := engine.GetAgent()
++	sessions := engine.sessions
++	bindingChannelKey := ""
++	bindingWorkDir := ""
++	workDir := strings.TrimSpace(req.WorkDir)
++	if workDir != "" {
++		if !engine.multiWorkspace || engine.workspaceBindings == nil {
++			http.Error(w, "work_dir requires a multi-workspace project", http.StatusConflict)
++			return
++		}
++		resolved, err := resolveLocalDirPath(workDir, engine.baseDir)
++		if err != nil {
++			http.Error(w, "invalid work_dir: "+err.Error(), http.StatusUnprocessableEntity)
++			return
++		}
++		base, err := filepath.Abs(engine.baseDir)
++		if err != nil {
++			http.Error(w, "invalid project base_dir", http.StatusInternalServerError)
++			return
++		}
++		if evaluated, evalErr := filepath.EvalSymlinks(base); evalErr == nil {
++			base = evaluated
++		}
++		rel, err := filepath.Rel(base, resolved)
++		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
++			http.Error(w, "work_dir is outside project base_dir", http.StatusUnprocessableEntity)
++			return
++		}
++		info, err := os.Stat(resolved)
++		if err != nil || !info.IsDir() {
++			http.Error(w, "work_dir does not exist or is not a directory", http.StatusUnprocessableEntity)
++			return
++		}
++		channelKey := extractWorkspaceChannelKey(req.SessionKey)
++		if channelKey == "" {
++			http.Error(w, "cannot derive workspace channel from session_key", http.StatusBadRequest)
++			return
++		}
++		workspaceAgent, workspaceSessions, err := engine.getOrCreateWorkspaceAgent(resolved)
++		if err != nil {
++			http.Error(w, "create workspace agent: "+err.Error(), http.StatusInternalServerError)
++			return
++		}
++		agent = workspaceAgent
++		sessions = workspaceSessions
++		bindingChannelKey = channelKey
++		bindingWorkDir = resolved
++	}
++	if validator, supported := agent.(SessionIDValidator); supported && !validator.ValidateSessionID(r.Context(), req.SessionID) {
++		http.Error(w, "agent session not found in the configured project", http.StatusUnprocessableEntity)
++		return
++	}
++	if bindingChannelKey != "" {
++		engine.workspaceBindings.Bind("project:"+engine.name, bindingChannelKey, name, bindingWorkDir)
++	}
++	session := sessions.SwitchToAgentSession(req.SessionKey, req.SessionID, agent.Name(), name)
++	apiJSON(w, http.StatusOK, map[string]string{
++		"status":           "ok",
++		"session_key":      req.SessionKey,
++		"agent_session_id": req.SessionID,
++		"session_id":       session.ID,
++	})
++}
++
+ // ── Cron API ───────────────────────────────────────────────────
+ 
+ // CronAddRequest is the JSON body for POST /cron/add.
+diff --git a/core/api_test.go b/core/api_test.go
+index 2f3a94d..1f76692 100644
+--- a/core/api_test.go
++++ b/core/api_test.go
+@@ -6,6 +6,7 @@ import (
+ 	"encoding/json"
+ 	"net/http"
+ 	"net/http/httptest"
++	"os"
+ 	"path/filepath"
+ 	"strings"
+ 	"testing"
+@@ -153,6 +154,68 @@ func TestHandleSend_EmptyProjectFallsBackToSingleEngine(t *testing.T) {
+ 	}
+ }
+ 
++func TestHandleBindAgentSession(t *testing.T) {
++	engine := NewEngine("projectA", &stubAgent{}, nil, "", LangEnglish)
++	api := &APIServer{engines: map[string]*Engine{"projectA": engine}}
++	body, err := json.Marshal(BindAgentSessionRequest{
++		Project:     "projectA",
++		SessionKey:  "feishu:oc_chat:ou_user",
++		SessionID:   "codex-thread-id",
++		SessionName: "local Codex session",
++	})
++	if err != nil {
++		t.Fatalf("marshal: %v", err)
++	}
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions/bind-agent", bytes.NewReader(body))
++	rec := httptest.NewRecorder()
++	api.handleBindAgentSession(rec, req)
++
++	if rec.Code != http.StatusOK {
++		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
++	}
++	session := engine.sessions.GetOrCreateActive("feishu:oc_chat:ou_user")
++	if got := session.GetAgentSessionID(); got != "codex-thread-id" {
++		t.Fatalf("agent session id = %q, want codex-thread-id", got)
++	}
++}
++
++func TestHandleBindAgentSessionWithWorkspace(t *testing.T) {
++	baseDir := t.TempDir()
++	workDir := filepath.Join(baseDir, "repo")
++	if err := os.Mkdir(workDir, 0o755); err != nil {
++		t.Fatal(err)
++	}
++	engine := newTestEngineWithMultiWorkspaceAgent(t, baseDir)
++	api := &APIServer{engines: map[string]*Engine{"test": engine}}
++	body, err := json.Marshal(BindAgentSessionRequest{
++		Project: "test", SessionKey: "feishu:oc_chat:ou_user",
++		SessionID: "codex-thread-id", SessionName: "local session", WorkDir: workDir,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	req := httptest.NewRequest(http.MethodPost, "/sessions/bind-agent", bytes.NewReader(body))
++	rec := httptest.NewRecorder()
++	api.handleBindAgentSession(rec, req)
++	if rec.Code != http.StatusOK {
++		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
++	}
++
++	binding := engine.workspaceBindings.Lookup("project:test", "feishu:oc_chat")
++	if binding == nil || binding.Workspace != normalizeWorkspacePath(workDir) {
++		t.Fatalf("workspace binding = %#v, want %q", binding, normalizeWorkspacePath(workDir))
++	}
++	_, sessions, err := engine.getOrCreateWorkspaceAgent(normalizeWorkspacePath(workDir))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := sessions.GetOrCreateActive("feishu:oc_chat:ou_user").GetAgentSessionID(); got != "codex-thread-id" {
++		t.Fatalf("workspace agent session id = %q, want codex-thread-id", got)
++	}
++}
++
+ // TestHandleSend_EmptyProjectMultipleEnginesRequiresName ensures the API
+ // refuses to guess when more than one engine is loaded and the caller did
+ // not specify which one to send to.
