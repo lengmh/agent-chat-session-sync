@@ -37,7 +37,12 @@ class CCConnectBridge:
             ensure_ascii=False,
         )
         try:
-            connection.request("POST", "/sessions/bind-agent", body=body, headers={"Content-Type": "application/json"})
+            connection.request(
+                "POST",
+                "/sessions/bind-agent",
+                body=body.encode("utf-8"),
+                headers={"Content-Type": "application/json; charset=utf-8"},
+            )
             response = connection.getresponse()
             text = response.read().decode("utf-8", errors="replace")
         finally:
