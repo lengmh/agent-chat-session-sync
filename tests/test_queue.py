@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+import sqlite3
 
 from agent_chat_session_sync.models import Binding
 from agent_chat_session_sync.queue import EventDatabase, stable_event_id
@@ -44,6 +45,31 @@ class EventDatabaseTests(unittest.TestCase):
         self.assertEqual(first, duplicate)
         self.assertNotEqual(first, second_turn)
 
+    def test_claude_identity_is_namespaced_from_codex(self) -> None:
+        raw = {"hook_event_name": "Stop", "session_id": "same"}
+        with tempfile.TemporaryDirectory() as directory:
+            database = EventDatabase(Path(directory) / "events.sqlite3")
+            codex, _ = database.enqueue(raw, agent_type="codex")
+            claude, _ = database.enqueue(raw, agent_type="claudecode")
+            self.assertNotEqual(codex, claude)
+        self.assertNotEqual(
+            stable_event_id("same", "Stop", "turn", "answer", "codex"),
+            stable_event_id("same", "Stop", "turn", "answer", "claudecode"),
+        )
+
+    def test_schema_v1_database_adds_agent_type(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            path = Path(raw) / "events.sqlite3"
+            db = sqlite3.connect(path)
+            db.execute("CREATE TABLE inbox (id INTEGER PRIMARY KEY, receipt_id TEXT, state TEXT, raw_json TEXT, bridge_originated INTEGER, received_at REAL, updated_at REAL, next_attempt_at REAL, attempts INTEGER, rollout_id TEXT, rollout_path TEXT, resolution_method TEXT, candidates_json TEXT, stable_event_id TEXT, last_error TEXT)")
+            db.commit()
+            db.close()
+            EventDatabase(path)
+            reopened = sqlite3.connect(path)
+            columns = {row[1] for row in reopened.execute("PRAGMA table_info(inbox)")}
+            reopened.close()
+            self.assertIn("agent_type", columns)
+
     def test_legacy_bindings_are_imported_once(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
@@ -54,6 +80,13 @@ class EventDatabaseTests(unittest.TestCase):
             self.assertEqual(database.import_legacy_bindings(state), 1)
             self.assertEqual(database.import_legacy_bindings(state), 0)
             self.assertEqual(database.get_binding("rollout"), binding)
+
+    def test_list_bindings_preserves_namespaced_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            database = EventDatabase(Path(raw) / "events.sqlite3")
+            binding = Binding("oc_1", "feishu:oc_1:ou_1", "claude", "/work", 1, "now")
+            database.put_binding("claudecode:session", binding)
+            self.assertEqual(database.list_bindings(), [("claudecode:session", binding)])
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -14,8 +15,10 @@ from .bridges.cc_connect import CCConnectBridge
 from .config import Settings, load_cc_connect_config
 from .installer import (
     install_codex_hooks,
+    install_claude_hooks,
     install_worker_service,
     uninstall_codex_hooks,
+    uninstall_claude_hooks,
     uninstall_worker_service,
 )
 from .models import Binding
@@ -31,6 +34,10 @@ def _doctor(settings: Settings) -> int:
         ("cc-connect config", settings.cc_config.is_file(), str(settings.cc_config)),
         ("cc-connect socket", settings.cc_socket.exists(), str(settings.cc_socket)),
         ("Codex sessions", (settings.codex_home / "sessions").is_dir(), str(settings.codex_home / "sessions")),
+        ("Claude Code CLI", shutil.which("claude") is not None, shutil.which("claude") or "claude not found"),
+        ("Claude sessions", (settings.claude_home / "projects").is_dir(), str(settings.claude_home / "projects")),
+        ("Codex Hook", (settings.codex_home / "hooks.json").is_file(), str(settings.codex_home / "hooks.json")),
+        ("Claude Hook", (settings.claude_home / "settings.json").is_file(), str(settings.claude_home / "settings.json")),
     ]
     try:
         config = load_cc_connect_config(settings.cc_config)
@@ -38,11 +45,37 @@ def _doctor(settings: Settings) -> int:
         configured = any(
             any(platform.get("type") == "feishu" for platform in project.get("platforms", [])) for project in projects
         )
+        agent_types = {
+            str(project.get("agent", {}).get("type", "codex")).lower()
+            for project in projects
+            if any(platform.get("type") == "feishu" for platform in project.get("platforms", []))
+        }
+        shared_apps: dict[str, list[dict]] = {}
+        for project in projects:
+            for platform in project.get("platforms", []):
+                if platform.get("type") != "feishu":
+                    continue
+                app_id = str(platform.get("options", {}).get("app_id", ""))
+                if app_id:
+                    shared_apps.setdefault(app_id, []).append(platform)
+        routing_ok = all(
+            len(platforms) == 1
+            or all(bool(platform.get("options", {}).get("binding_routing")) for platform in platforms)
+            for platforms in shared_apps.values()
+        )
     except Exception:
         configured = False
+        agent_types = set()
+        routing_ok = False
     checks.append(("Feishu project", configured, "at least one cc-connect project"))
-    attach = CCConnectBridge(settings.cc_socket).supports_attach() if settings.cc_socket.exists() else False
+    checks.append(("Codex project", "codex" in agent_types, "Codex + Feishu"))
+    checks.append(("Claude project", "claudecode" in agent_types, "Claude Code + Feishu"))
+    checks.append(("shared Bot routing", routing_ok, "binding_routing=true for projects sharing app_id"))
+    bridge = CCConnectBridge(settings.cc_socket)
+    attach = bridge.supports_attach() if settings.cc_socket.exists() else False
     checks.append(("bind-agent extension", attach, "POST /sessions/bind-agent"))
+    capabilities = bridge.capabilities() if settings.cc_socket.exists() else set()
+    checks.append(("binding routing extension", "binding_routing" in capabilities, "GET /sessions/bind-agent"))
     try:
         EventDatabase(settings.database_path)
         database_ok = True
@@ -148,7 +181,12 @@ def _hook_provenance(path: Path) -> dict[str, str]:
     return json.loads(result.stdout)
 
 
-def _verify_install(source: Path, expected_commit: str, hooks_file: Path | None = None) -> int:
+def _verify_install(
+    source: Path,
+    expected_commit: str,
+    hooks_file: Path | None = None,
+    claude_settings_file: Path | None = None,
+) -> int:
     source = source.resolve()
     head = source_head(source)
     dirty = subprocess.run(
@@ -156,8 +194,11 @@ def _verify_install(source: Path, expected_commit: str, hooks_file: Path | None 
     ).stdout.strip()
     installed = current_provenance().to_dict()
     hook = _hook_provenance(hooks_file or (Path.home() / ".codex/hooks.json"))
+    claude_hook = _hook_provenance(
+        claude_settings_file or (Path.home() / ".claude/settings.json")
+    )
     expected = expected_commit or head
-    checks = provenance_checks(head, dirty, expected, installed, hook)
+    checks = provenance_checks(head, dirty, expected, installed, hook, claude_hook)
     for name, okay, detail in checks:
         print(f"{'OK' if okay else 'FAIL':4}  {name}: {detail}")
     return 0 if all(check[1] for check in checks) else 1
@@ -169,8 +210,9 @@ def provenance_checks(
     expected: str,
     installed: dict[str, str],
     hook: dict[str, str],
+    claude_hook: dict[str, str] | None = None,
 ) -> list[tuple[str, bool, str]]:
-    return [
+    checks = [
         ("source repository clean", not dirty, "clean" if not dirty else "working tree has uncommitted changes"),
         ("source commit", head == expected, f"source={head} expected={expected}"),
         ("built package commit", installed["git_commit"] == expected, f"package={installed['git_commit']}"),
@@ -186,6 +228,27 @@ def provenance_checks(
             f"hook={hook.get('python_path')} verifier={installed['python_path']}",
         ),
     ]
+    if claude_hook is not None:
+        checks.extend(
+            [
+                (
+                    "Claude Hook imported commit",
+                    claude_hook.get("git_commit") == expected,
+                    f"claude_hook={claude_hook.get('git_commit')}",
+                ),
+                (
+                    "Claude Hook package path",
+                    claude_hook.get("package_path") == installed["package_path"],
+                    f"claude_hook={claude_hook.get('package_path')} verifier={installed['package_path']}",
+                ),
+                (
+                    "Claude Hook Python path",
+                    claude_hook.get("python_path") == installed["python_path"],
+                    f"claude_hook={claude_hook.get('python_path')} verifier={installed['python_path']}",
+                ),
+            ]
+        )
+    return checks
 
 
 def _migrate_state(settings: Settings, source: Path) -> int:
@@ -226,14 +289,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agent-chat-session-sync")
     parser.add_argument("--version", action="version", version=__version__)
     subparsers = parser.add_subparsers(dest="command", required=True)
-    subparsers.add_parser("hook", help="consume one Codex hook event from stdin")
+    hook = subparsers.add_parser("hook", help="consume one Agent hook event from stdin")
+    hook.add_argument("--agent", choices=("codex", "claudecode"), default="codex")
     worker = subparsers.add_parser("worker", help="process the durable event queue")
     worker.add_argument("--once", action="store_true")
     worker.add_argument("--poll-interval", type=float, default=1.0)
     install = subparsers.add_parser("install-hooks", help="install or update Codex hooks")
     install.add_argument("--hooks-file", type=Path)
+    install.add_argument("--claude-settings-file", type=Path)
     uninstall = subparsers.add_parser("uninstall-hooks", help="remove this project's Codex hooks")
     uninstall.add_argument("--hooks-file", type=Path)
+    uninstall.add_argument("--claude-settings-file", type=Path)
     subparsers.add_parser("install-service", help="install and start the durable worker service")
     subparsers.add_parser("uninstall-service", help="stop and remove the durable worker service")
     subparsers.add_parser("doctor", help="check local prerequisites and the cc-connect extension")
@@ -252,7 +318,9 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--source", type=Path, required=True)
     verify.add_argument("--expected-commit", default="")
     verify.add_argument("--hooks-file", type=Path)
-    acceptance = subparsers.add_parser("acceptance-live", help="run the real Codex/Hook/Feishu acceptance flow")
+    verify.add_argument("--claude-settings-file", type=Path)
+    acceptance = subparsers.add_parser("acceptance-live", help="run the real Agent/Hook/Feishu acceptance flow")
+    acceptance.add_argument("--agent", choices=("codex", "claudecode"), default="codex")
     acceptance.add_argument("--timeout", type=float, default=300)
     acceptance.add_argument("--keep-resources", action="store_true")
     acceptance.add_argument(
@@ -268,7 +336,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "hook":
-        return hook_main()
+        return hook_main(args.agent)
     if args.command == "provenance":
         if args.json:
             print(provenance_json())
@@ -277,10 +345,12 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"{key}: {value}")
         return 0
     if args.command == "install-hooks":
-        print(f"installed hooks: {install_codex_hooks(args.hooks_file)}")
+        print(f"installed Codex hooks: {install_codex_hooks(args.hooks_file)}")
+        print(f"installed Claude Code hooks: {install_claude_hooks(args.claude_settings_file)}")
         return 0
     if args.command == "uninstall-hooks":
-        print(f"removed hooks: {uninstall_codex_hooks(args.hooks_file)}")
+        print(f"removed Codex hooks: {uninstall_codex_hooks(args.hooks_file)}")
+        print(f"removed Claude Code hooks: {uninstall_claude_hooks(args.claude_settings_file)}")
         return 0
     settings = Settings.from_env()
     if args.command == "worker":
@@ -308,12 +378,18 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{'scheduled' if okay else 'not scheduled'} inbox={args.event_id}")
         return 0 if okay else 1
     if args.command == "verify-install":
-        return _verify_install(args.source, args.expected_commit, args.hooks_file)
+        return _verify_install(
+            args.source,
+            args.expected_commit,
+            args.hooks_file,
+            args.claude_settings_file,
+        )
     if args.command == "acceptance-live":
         result = LiveAcceptance(settings, make_logger(settings.worker_log_path)).run(
             timeout=args.timeout,
             keep_resources=args.keep_resources,
             skip_reply=args.skip_reply,
+            agent_type=args.agent,
         )
         print(json.dumps(result.__dict__, ensure_ascii=False, sort_keys=True))
         if args.skip_reply:

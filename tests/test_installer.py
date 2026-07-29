@@ -5,7 +5,12 @@ import tempfile
 import unittest
 from unittest import mock
 
-from agent_chat_session_sync.installer import installed_executable, install_codex_hooks, uninstall_codex_hooks
+from agent_chat_session_sync.installer import (
+    installed_executable,
+    install_claude_hooks,
+    install_codex_hooks,
+    uninstall_codex_hooks,
+)
 
 
 class InstallerTests(unittest.TestCase):
@@ -36,6 +41,16 @@ class InstallerTests(unittest.TestCase):
             uninstall_codex_hooks(path)
             document = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(document["hooks"], {})
+
+    def test_claude_install_preserves_settings_and_is_idempotent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            path.write_text(json.dumps({"permissions": {"allow": ["Read"]}}), encoding="utf-8")
+            install_claude_hooks(path, "agent-chat-session-sync hook --agent claudecode")
+            install_claude_hooks(path, "agent-chat-session-sync hook --agent claudecode")
+            document = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(document["permissions"], {"allow": ["Read"]})
+            self.assertEqual(len(document["hooks"]["Stop"]), 1)
 
     def test_installed_executable_uses_current_venv_even_when_path_omits_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

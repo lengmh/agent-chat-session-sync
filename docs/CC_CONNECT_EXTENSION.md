@@ -6,6 +6,8 @@ cc-connect normally learns an Agent session ID after a platform message starts t
 
 The extension exposes cc-connect's existing `SessionManager.SwitchToAgentSession` operation through its local Unix-socket API. It does not add another session store or change normal platform-first behavior.
 
+The separate binding-routing patch adds `binding_routing = true` for Feishu projects sharing one Bot credential. A successful attach registers the chat only in the selected engine; the Python worker replays durable bindings after cc-connect restarts. `GET /sessions/bind-agent` reports the `attach_agent_session` and `binding_routing` capabilities without mutating state.
+
 The patch also carries two independent Codex extensions:
 
 1. `permission_profile` selects a Codex native permission profile after fail-closed `permissionProfile/list` discovery for the session cwd. It is mutually exclusive with legacy sandbox fields.

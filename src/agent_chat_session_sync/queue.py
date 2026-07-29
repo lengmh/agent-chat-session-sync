@@ -32,14 +32,22 @@ def sha256_text(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def receipt_id(raw: dict[str, Any], bridge_originated: bool = False) -> str:
-    return sha256_text(canonical_json({"raw": raw, "bridge_originated": bridge_originated}))
+def receipt_id(raw: dict[str, Any], bridge_originated: bool = False, agent_type: str = "codex") -> str:
+    envelope: dict[str, Any] = {"raw": raw, "bridge_originated": bridge_originated}
+    if agent_type != "codex":
+        envelope["agent_type"] = agent_type
+    return sha256_text(canonical_json(envelope))
 
 
-def stable_event_id(rollout_id: str, event_name: str, turn_id: str, content: str) -> str:
+def stable_event_id(
+    rollout_id: str, event_name: str, turn_id: str, content: str, agent_type: str = "codex"
+) -> str:
     content_hash = sha256_text(content)
     discriminator = turn_id.strip() or content_hash
-    return sha256_text("\x00".join((rollout_id.lower(), event_name, discriminator, content_hash)))
+    parts = (rollout_id.lower(), event_name, discriminator, content_hash)
+    if agent_type != "codex":
+        parts = (agent_type, *parts)
+    return sha256_text("\x00".join(parts))
 
 
 @dataclass(frozen=True)
@@ -49,6 +57,7 @@ class QueuedEvent:
     state: str
     raw: dict[str, Any]
     bridge_originated: bool
+    agent_type: str
     received_at: float
     attempts: int
     rollout_id: str
@@ -71,7 +80,7 @@ class OutboxRecord:
 
 
 class EventDatabase:
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, path: Path):
         self.path = path
@@ -106,6 +115,7 @@ class EventDatabase:
                     state TEXT NOT NULL,
                     raw_json TEXT NOT NULL,
                     bridge_originated INTEGER NOT NULL DEFAULT 0,
+                    agent_type TEXT NOT NULL DEFAULT 'codex',
                     received_at REAL NOT NULL,
                     updated_at REAL NOT NULL,
                     next_attempt_at REAL NOT NULL,
@@ -149,6 +159,9 @@ class EventDatabase:
                 );
                 """
             )
+            columns = {str(row["name"]) for row in db.execute("PRAGMA table_info(inbox)")}
+            if "agent_type" not in columns:
+                db.execute("ALTER TABLE inbox ADD COLUMN agent_type TEXT NOT NULL DEFAULT 'codex'")
             db.execute(
                 "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -156,9 +169,15 @@ class EventDatabase:
             )
         self.path.chmod(0o600)
 
-    def enqueue(self, raw: dict[str, Any], bridge_originated: bool = False, now: float | None = None) -> tuple[int, bool]:
+    def enqueue(
+        self,
+        raw: dict[str, Any],
+        bridge_originated: bool = False,
+        now: float | None = None,
+        agent_type: str = "codex",
+    ) -> tuple[int, bool]:
         timestamp = time.time() if now is None else now
-        rid = receipt_id(raw, bridge_originated)
+        rid = receipt_id(raw, bridge_originated, agent_type)
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             existing = db.execute("SELECT id FROM inbox WHERE receipt_id=?", (rid,)).fetchone()
@@ -166,9 +185,9 @@ class EventDatabase:
                 db.execute("COMMIT")
                 return int(existing["id"]), False
             cursor = db.execute(
-                "INSERT INTO inbox(receipt_id,state,raw_json,bridge_originated,received_at,updated_at,next_attempt_at) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (rid, "received", canonical_json(raw), int(bridge_originated), timestamp, timestamp, timestamp),
+                "INSERT INTO inbox(receipt_id,state,raw_json,bridge_originated,agent_type,received_at,updated_at,next_attempt_at) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (rid, "received", canonical_json(raw), int(bridge_originated), agent_type, timestamp, timestamp, timestamp),
             )
             event_id = int(cursor.lastrowid)
             db.execute("COMMIT")
@@ -206,9 +225,15 @@ class EventDatabase:
             rows = db.execute("SELECT * FROM inbox ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
         return [self._event(row) for row in rows]
 
-    def events_for_rollout(self, rollout_id: str) -> list[QueuedEvent]:
+    def events_for_rollout(self, rollout_id: str, agent_type: str = "") -> list[QueuedEvent]:
         with self.connect() as db:
-            rows = db.execute("SELECT * FROM inbox WHERE rollout_id=? ORDER BY id", (rollout_id,)).fetchall()
+            if agent_type:
+                rows = db.execute(
+                    "SELECT * FROM inbox WHERE rollout_id=? AND agent_type=? ORDER BY id",
+                    (rollout_id, agent_type),
+                ).fetchall()
+            else:
+                rows = db.execute("SELECT * FROM inbox WHERE rollout_id=? ORDER BY id", (rollout_id,)).fetchall()
         return [self._event(row) for row in rows]
 
     def outbox_for_rollout(self, rollout_id: str) -> list[OutboxRecord]:
@@ -224,6 +249,7 @@ class EventDatabase:
             state=str(row["state"]),
             raw=json.loads(str(row["raw_json"])),
             bridge_originated=bool(row["bridge_originated"]),
+            agent_type=str(row["agent_type"]),
             received_at=float(row["received_at"]),
             attempts=int(row["attempts"]),
             rollout_id=str(row["rollout_id"]),
@@ -384,6 +410,26 @@ class EventDatabase:
                     time.time(),
                 ),
             )
+
+    def list_bindings(self) -> list[tuple[str, Binding]]:
+        """Return a stable snapshot used to rebuild cc-connect's in-memory routes."""
+        with self.connect() as db:
+            rows = db.execute("SELECT * FROM bindings ORDER BY rollout_id").fetchall()
+        return [
+            (
+                str(row["rollout_id"]),
+                Binding(
+                    chat_id=str(row["chat_id"]),
+                    session_key=str(row["session_key"]),
+                    project=str(row["project"]),
+                    cwd=str(row["cwd"]),
+                    generation=int(row["generation"]),
+                    created_at=str(row["created_at"]),
+                    title=str(row["title"]),
+                ),
+            )
+            for row in rows
+        ]
 
     def invalidate_binding(self, rollout_id: str, expected_chat_id: str) -> bool:
         with self.connect() as db:

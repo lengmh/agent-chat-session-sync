@@ -75,7 +75,7 @@ type = "feishu"
 ''',
         encoding="utf-8",
     )
-    settings = Settings(data, config, root / "api.sock", codex_home)
+    settings = Settings(data, config, root / "api.sock", codex_home, root / ".claude")
     return settings, work
 
 
@@ -88,7 +88,24 @@ class WorkerTests(unittest.TestCase):
     def make_worker(self, settings: Settings, platform: FakePlatform, bridge: FakeBridge) -> EventWorker:
         worker = EventWorker(settings, lambda _: None, platform_factory=lambda _: platform)
         worker.coordinator.bridge = bridge
+        worker.claude_coordinator.bridge = bridge
         return worker
+
+    @staticmethod
+    def enable_claude_project(settings: Settings, root: Path) -> None:
+        with settings.cc_config.open("a", encoding="utf-8") as handle:
+            handle.write(
+                f'''\n[[projects]]
+name = "claude-project"
+mode = "multi-workspace"
+base_dir = "{root}"
+[projects.agent]
+type = "claudecode"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+'''
+            )
 
     def test_hook_event_reaches_delivered_with_platform_message_id(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -197,6 +214,61 @@ class WorkerTests(unittest.TestCase):
             platform = FakePlatform()
             self.make_worker(settings, platform, FakeBridge()).run_once()
             self.assertEqual(len(platform.sent), 1)
+
+    def test_claude_event_uses_claude_project_and_namespaced_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            settings, work = make_settings(root)
+            self.enable_claude_project(settings, root)
+            session_id = "a0b1c2d3-1111-2222-3333-444455556666"
+            transcript = settings.claude_home / "projects/p" / f"{session_id}.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text(
+                json.dumps({"type": "user", "sessionId": session_id, "cwd": str(work), "message": {"content": "hello"}}) + "\n",
+                encoding="utf-8",
+            )
+            database = EventDatabase(settings.database_path)
+            inbox_id, _ = database.enqueue(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": session_id,
+                    "prompt_id": "prompt-1",
+                    "transcript_path": str(transcript),
+                    "cwd": str(work),
+                    "prompt": "hello",
+                },
+                agent_type="claudecode",
+            )
+            bridge = FakeBridge()
+            platform = FakePlatform()
+            self.make_worker(settings, platform, bridge).run_once()
+            self.assertEqual(database.get_event(inbox_id).state, "delivered")
+            self.assertEqual(bridge.attached[0][0], "claude-project")
+            self.assertEqual(database.get_binding(f"claudecode:{session_id}").project, "claude-project")
+
+    def test_worker_replays_bindings_when_cc_connect_socket_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            settings, _work = make_settings(root)
+            settings.cc_socket.touch()
+            database = EventDatabase(settings.database_path)
+            from agent_chat_session_sync.models import Binding
+
+            database.put_binding(
+                "claudecode:a0b1c2d3-1111-2222-3333-444455556666",
+                Binding("oc_1", "feishu:oc_1:ou_user", "claude-project", str(root), 1, "now", "Claude test"),
+            )
+            bridge = FakeBridge()
+            worker = self.make_worker(settings, FakePlatform(), bridge)
+            worker._maybe_replay_bindings()
+            self.assertEqual(len(bridge.attached), 1)
+            self.assertEqual(bridge.attached[0][2], "a0b1c2d3-1111-2222-3333-444455556666")
+            worker._maybe_replay_bindings()
+            self.assertEqual(len(bridge.attached), 1)
+            settings.cc_socket.unlink()
+            settings.cc_socket.touch()
+            worker._maybe_replay_bindings()
+            self.assertEqual(len(bridge.attached), 2)
 
 
 if __name__ == "__main__":

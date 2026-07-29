@@ -17,6 +17,8 @@ RECENT_ROLLOUT_SECONDS = 5 * 60
 
 
 class CodexAdapter:
+    agent_type = "codex"
+
     def __init__(self, codex_home: Path, logger: Callable[[str], None]):
         self.sessions_dir = codex_home / "sessions"
         self.session_index = codex_home / "session_index.jsonl"
@@ -32,6 +34,8 @@ class CodexAdapter:
             prompt=str(raw.get("prompt", "")),
             assistant_message=str(raw.get("last_assistant_message", "")),
             turn_id=str(raw.get("turn_id") or raw.get("turnId") or "").strip(),
+            agent_type="codex",
+            session_title=str(raw.get("session_title") or "").strip(),
         )
 
     def resolve_stable_session_id(self, event: AgentEvent) -> str | None:
@@ -108,6 +112,11 @@ class CodexAdapter:
         return bool(environment.get("CC_SESSION_KEY"))
 
     @staticmethod
+    def binding_key(session_id: str) -> str:
+        # Keep the legacy key stable for existing Codex installations.
+        return session_id
+
+    @staticmethod
     def event_text(event: AgentEvent, rollout_id: str = "") -> str | None:
         if event.name == "SessionStart":
             return (
@@ -144,5 +153,5 @@ class CodexAdapter:
             return None
         return title
 
-    def chat_title(self, session_id: str, cwd: str) -> str:
+    def chat_title(self, session_id: str, cwd: str, event: AgentEvent | None = None) -> str:
         return (self.session_title(session_id) or f"Codex · {Path(cwd).name} · {session_id[:8]}")[:60]

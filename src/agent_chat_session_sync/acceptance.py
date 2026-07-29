@@ -24,14 +24,20 @@ class AcceptanceResult:
 
 
 class LiveAcceptance:
-    """Real Codex → Hook → worker → Feishu → cc-connect acceptance harness."""
+    """Real local Agent → Hook → worker → Feishu → cc-connect acceptance harness."""
 
     def __init__(self, settings: Settings, logger: Callable[[str], None]):
         self.settings = settings
         self.logger = logger
         self.database = EventDatabase(settings.database_path)
 
-    def run(self, timeout: float = 300, keep_resources: bool = False, skip_reply: bool = False) -> AcceptanceResult:
+    def run(
+        self,
+        timeout: float = 300,
+        keep_resources: bool = False,
+        skip_reply: bool = False,
+        agent_type: str = "codex",
+    ) -> AcceptanceResult:
         token = f"ACSS-E2E-{uuid.uuid4().hex[:10]}"
         reply_token = f"{token}-REPLY"
         workspace = self.settings.data_dir / "acceptance" / token.lower()
@@ -39,29 +45,30 @@ class LiveAcceptance:
         (workspace / "README.md").write_text("agent-chat-session-sync live acceptance workspace\n", encoding="utf-8")
         subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
         prompt = f"Reply with exactly this token and no other text: {token}"
-        command = [
-            "codex",
-            "exec",
-            "--json",
-            "--sandbox",
-            "read-only",
-            "--dangerously-bypass-hook-trust",
-            "-C",
-            str(workspace),
-            prompt,
-        ]
-        self.logger(f"acceptance codex start token={token} workspace={workspace}")
-        result = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
+        if agent_type == "claudecode":
+            session_id = str(uuid.uuid4())
+            command = [
+                "claude", "-p", "--output-format", "json", "--permission-mode", "dontAsk",
+                "--session-id", session_id, prompt,
+            ]
+        else:
+            session_id = ""
+            command = [
+                "codex", "exec", "--json", "--sandbox", "read-only",
+                "--dangerously-bypass-hook-trust", "-C", str(workspace), prompt,
+            ]
+        self.logger(f"acceptance {agent_type} start token={token} workspace={workspace}")
+        result = subprocess.run(command, cwd=workspace, text=True, capture_output=True, timeout=timeout)
         if result.returncode != 0:
-            raise RuntimeError(f"Codex acceptance session failed: {result.stderr[-2000:]}")
-        rollout_id = self._thread_id(result.stdout)
+            raise RuntimeError(f"{agent_type} acceptance session failed: {result.stderr[-2000:]}")
+        rollout_id = session_id or self._thread_id(result.stdout)
         if not rollout_id:
-            raise RuntimeError("Codex acceptance output did not contain thread_id")
+            raise RuntimeError("acceptance output did not contain a native session ID")
 
         deadline = time.time() + timeout
         required = {"UserPromptSubmit", "Stop"}
         while time.time() < deadline:
-            events = self.database.events_for_rollout(rollout_id)
+            events = self.database.events_for_rollout(rollout_id, agent_type)
             delivered = {
                 str(event.raw.get("hook_event_name", ""))
                 for event in events
@@ -71,10 +78,11 @@ class LiveAcceptance:
                 break
             time.sleep(1)
         else:
-            states = [(event.id, event.state, event.last_error) for event in self.database.events_for_rollout(rollout_id)]
+            states = [(event.id, event.state, event.last_error) for event in self.database.events_for_rollout(rollout_id, agent_type)]
             raise TimeoutError(f"Hook events were not delivered for rollout {rollout_id}: {states}")
 
-        binding = self.database.get_binding(rollout_id)
+        binding_key = f"claudecode:{rollout_id}" if agent_type == "claudecode" else rollout_id
+        binding = self.database.get_binding(binding_key)
         if binding is None:
             raise RuntimeError(f"no chat binding for acceptance rollout {rollout_id}")
         outbox = self.database.outbox_for_rollout(rollout_id)
@@ -83,7 +91,7 @@ class LiveAcceptance:
             raise RuntimeError(f"expected prompt and assistant outbox messages, got {len(messages)}")
 
         config = load_cc_connect_config(self.settings.cc_config)
-        project = matching_project(config, str(workspace))
+        project = matching_project(config, str(workspace), agent_type)
         if project is None:
             raise RuntimeError("acceptance workspace is not covered by cc-connect config")
         platform = FeishuPlatform.from_options(project.platform_options)
@@ -95,7 +103,7 @@ class LiveAcceptance:
         if not skip_reply:
             print(f"请在飞书测试群发送：{reply_token}")
             print(f"测试群 chat_id：{binding.chat_id}")
-            rollout_path = Path(next(event.rollout_path for event in self.database.events_for_rollout(rollout_id) if event.rollout_path))
+            rollout_path = Path(next(event.rollout_path for event in self.database.events_for_rollout(rollout_id, agent_type) if event.rollout_path))
             while time.time() < deadline:
                 try:
                     if reply_token in rollout_path.read_text(encoding="utf-8", errors="ignore"):
@@ -104,12 +112,12 @@ class LiveAcceptance:
                     pass
                 time.sleep(1)
             else:
-                raise TimeoutError("Feishu reply did not enter the same Codex rollout before timeout")
+                raise TimeoutError(f"Feishu reply did not enter the same {agent_type} session before timeout")
 
         cleaned = False
         if not keep_resources:
             platform.disband_chat(binding.chat_id)
-            self.database.invalidate_binding(rollout_id, binding.chat_id)
+            self.database.invalidate_binding(binding_key, binding.chat_id)
             shutil.rmtree(workspace)
             cleaned = True
         self.logger(f"acceptance passed rollout={rollout_id} token={token} cleaned={cleaned}")

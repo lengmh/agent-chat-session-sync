@@ -2,7 +2,7 @@
 
 ## Processing contract
 
-The Codex Hook is an inbox writer, not a synchronization worker. It serializes the unmodified Hook payload into
+The Codex and Claude Code Hooks are inbox writers, not synchronization workers. They serialize the unmodified Hook payload into
 `events.sqlite3` and returns immediately. If SQLite cannot accept the receipt, it appends the same payload to a mode-0600
 `emergency-inbox.jsonl`, calls `fsync`, and still avoids blocking the Codex turn. The worker atomically renames and imports
 that spool before claiming normal work.
@@ -24,7 +24,7 @@ missing or ambiguous rollout into a dead letter automatically.
 
 ## Session identity
 
-Resolution uses evidence in this order:
+Codex resolution uses evidence in this order:
 
 1. A valid `transcript_path` whose filename contains a rollout UUID.
 2. A Hook session ID that directly names an existing rollout.
@@ -35,6 +35,13 @@ Resolution uses evidence in this order:
 The last step requires a minimum score and a clear lead over the next candidate. Cwd is only one correlation signal.
 Two plausible sessions in the same directory stay in `waiting_confirmation` until stronger evidence appears or an operator
 uses `agent-chat-session-sync resolve`.
+
+Claude Code uses the same waiting-state contract, but its stable identity is the native Claude session UUID. Resolution prefers
+the Hook `transcript_path`, then the native session file, `history.jsonl`, delayed transcript discovery, and finally multi-factor
+correlation. Codex and Claude receipt, outbox, and binding identities are namespaced so equal UUID strings cannot collide.
+
+Dynamic Feishu routes live in cc-connect memory. The durable copy remains in SQLite; the worker replays all bindings on startup
+and whenever the cc-connect Socket inode or modification time changes.
 
 ## Outbox and idempotency
 

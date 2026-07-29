@@ -8,6 +8,7 @@ import os
 from typing import Callable
 
 from .agents.codex import CodexAdapter
+from .agents.claude_code import ClaudeCodeAdapter
 from .bridges.cc_connect import CCConnectBridge
 from .config import Settings, load_cc_connect_config, matching_project
 from .coordinator import PlatformFactory, SessionCoordinator
@@ -15,6 +16,7 @@ from .models import ResolutionResult
 from .platforms.feishu import FeishuPlatform
 from .queue import EventDatabase, SQLiteBindingStore, stable_event_id
 from .resolver import CodexSessionResolver
+from .claude_resolver import ClaudeSessionResolver
 
 
 class EventWorker:
@@ -33,6 +35,8 @@ class EventWorker:
         self.config = load_cc_connect_config(settings.cc_config)
         self.agent = CodexAdapter(settings.codex_home, logger)
         self.resolver = CodexSessionResolver(settings.codex_home, logger)
+        self.claude_agent = ClaudeCodeAdapter(settings.claude_home, logger)
+        self.claude_resolver = ClaudeSessionResolver(settings.claude_home, logger)
         self.platform_factory = platform_factory or (
             lambda project: FeishuPlatform.from_options(project.platform_options)
         )
@@ -44,6 +48,68 @@ class EventWorker:
             logger,
             platform_factory=self.platform_factory,
         )
+        self.claude_coordinator = SessionCoordinator(
+            self.claude_agent,
+            CCConnectBridge(settings.cc_socket),
+            SQLiteBindingStore(self.database),
+            self.config,
+            logger,
+            platform_factory=self.platform_factory,
+        )
+        self._route_replay_initialized = False
+        self._last_socket_signature: tuple[int, int] | None = None
+
+    def components(self, agent_type: str):
+        if agent_type == "claudecode":
+            return self.claude_agent, self.claude_resolver, self.claude_coordinator
+        return self.agent, self.resolver, self.coordinator
+
+    def _socket_signature(self) -> tuple[int, int] | None:
+        try:
+            stat = self.settings.cc_socket.stat()
+        except OSError:
+            return None
+        return stat.st_ino, stat.st_mtime_ns
+
+    def replay_bindings(self) -> tuple[int, int]:
+        """Reattach durable bindings and rebuild dynamic Feishu routes.
+
+        A replay is deliberately best-effort: an unavailable cc-connect daemon
+        must not prevent durable Hook receipts from being processed and retried.
+        """
+        replayed = 0
+        failed = 0
+        for binding_key, binding in self.database.list_bindings():
+            agent_type = "claudecode" if binding_key.startswith("claudecode:") else "codex"
+            session_id = binding_key.split(":", 1)[1] if agent_type == "claudecode" else binding_key
+            _agent, _resolver, coordinator = self.components(agent_type)
+            try:
+                coordinator.bridge.attach_agent_session(
+                    binding.project,
+                    binding.session_key,
+                    session_id,
+                    binding.title or f"{agent_type} · {session_id[:8]}",
+                    binding.cwd,
+                )
+                replayed += 1
+            except Exception as exc:
+                failed += 1
+                self.logger(
+                    f"binding replay deferred key={binding_key} project={binding.project} error={exc}"
+                )
+        if replayed or failed:
+            self.logger(f"binding replay complete replayed={replayed} failed={failed}")
+        return replayed, failed
+
+    def _maybe_replay_bindings(self) -> None:
+        signature = self._socket_signature()
+        changed = signature is not None and (
+            not self._route_replay_initialized or signature != self._last_socket_signature
+        )
+        self._route_replay_initialized = True
+        self._last_socket_signature = signature
+        if changed:
+            self.replay_bindings()
 
     def import_emergency_spool(self) -> int:
         spool = self.settings.data_dir / "emergency-inbox.jsonl"
@@ -64,6 +130,7 @@ class EventWorker:
                             item["raw"],
                             bool(item.get("bridge_originated")),
                             float(item.get("received_at") or time.time()),
+                            str(item.get("agent_type") or "codex"),
                         )
                         imported += 1
                     except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
@@ -79,6 +146,7 @@ class EventWorker:
         return float(min(300, max(1, 2 ** min(max(attempt - 1, 0), 8))))
 
     def run_once(self) -> bool:
+        self._maybe_replay_bindings()
         self.import_emergency_spool()
         queued = self.database.claim_due()
         if queued is None:
@@ -88,7 +156,8 @@ class EventWorker:
             self.logger(f"event delivered inbox={queued.id} ignored=bridge_origin")
             return True
 
-        event = self.agent.parse_event(queued.raw)
+        agent, resolver, coordinator = self.components(queued.agent_type)
+        event = agent.parse_event(queued.raw)
         if not event.cwd:
             self.database.retry(
                 queued.id,
@@ -104,10 +173,10 @@ class EventWorker:
                 rollout_id=queued.rollout_id,
                 rollout_path=queued.rollout_path,
                 method=queued.resolution_method,
-                turn_id=event.turn_id or self.resolver.resolve_turn_id(event, Path(queued.rollout_path)),
+                turn_id=event.turn_id or resolver.resolve_turn_id(event, Path(queued.rollout_path)),
             )
         else:
-            resolution = self.resolver.resolve(event, queued.received_at)
+            resolution = resolver.resolve(event, queued.received_at)
         if resolution.status != "resolved":
             state = "waiting_confirmation" if resolution.status == "waiting_confirmation" else "resolving_session"
             self.database.retry(
@@ -143,7 +212,7 @@ class EventWorker:
                 return True
             turn_id = f"receipt:{queued.receipt_id[:24]}"
             self.logger(f"event turn fallback inbox={queued.id} discriminator={turn_id}")
-        project = matching_project(self.config, event.cwd)
+        project = matching_project(self.config, event.cwd, queued.agent_type)
         if project is None:
             self.database.retry(
                 queued.id,
@@ -156,13 +225,14 @@ class EventWorker:
         try:
             platform = self.platform_factory(project)
             self.database.transition(queued.id, "binding_chat")
-            binding = self.coordinator.ensure_binding(resolution.rollout_id, event, project, platform)
-            payload = self.agent.event_text(event, resolution.rollout_id) or ""
+            binding = coordinator.ensure_binding(resolution.rollout_id, event, project, platform)
+            payload = agent.event_text(event, resolution.rollout_id) or ""
             eid = stable_event_id(
                 resolution.rollout_id,
                 event.name,
                 turn_id,
                 payload,
+                queued.agent_type,
             )
             outbox = self.database.ensure_outbox(eid, queued.id, resolution.rollout_id, event.name, payload)
             self.database.transition(queued.id, "sending", stable_event_id=eid)
@@ -175,7 +245,7 @@ class EventWorker:
                 self.database.transition(queued.id, "delivered", last_error="")
                 return True
             self.database.mark_outbox_sending(eid)
-            binding, message_id = self.coordinator.deliver(
+            binding, message_id = coordinator.deliver(
                 resolution.rollout_id,
                 event,
                 project,

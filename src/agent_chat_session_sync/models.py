@@ -13,6 +13,8 @@ class AgentEvent:
     prompt: str = ""
     assistant_message: str = ""
     turn_id: str = ""
+    agent_type: str = "codex"
+    session_title: str = ""
 
 
 @dataclass(frozen=True)

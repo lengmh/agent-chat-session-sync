@@ -61,3 +61,18 @@ class CCConnectBridge:
             return False
         finally:
             connection.close()
+
+    def capabilities(self) -> set[str]:
+        connection = UnixHTTPConnection(self.socket_path)
+        try:
+            connection.request("GET", "/sessions/bind-agent")
+            response = connection.getresponse()
+            payload = response.read().decode("utf-8", errors="replace")
+            if response.status != 200:
+                return set()
+            document = json.loads(payload)
+            return {str(item) for item in document.get("capabilities", [])}
+        except (OSError, ValueError, json.JSONDecodeError):
+            return set()
+        finally:
+            connection.close()

@@ -13,6 +13,8 @@ git -C "$SOURCE_DIR" fetch origin "$REVISION"
 git -C "$SOURCE_DIR" checkout --detach "$REVISION"
 git -C "$SOURCE_DIR" apply --check "$ROOT/patches/cc-connect-v1.4.1-bind-agent.patch"
 git -C "$SOURCE_DIR" apply "$ROOT/patches/cc-connect-v1.4.1-bind-agent.patch"
+git -C "$SOURCE_DIR" apply --check "$ROOT/patches/cc-connect-v1.4.1-binding-routing.patch"
+git -C "$SOURCE_DIR" apply "$ROOT/patches/cc-connect-v1.4.1-binding-routing.patch"
 mkdir -p "$(dirname -- "$OUTPUT")"
-(cd "$SOURCE_DIR" && go test ./core ./agent/codex && go build -tags 'no_web goolm' -o "$OUTPUT" ./cmd/cc-connect)
+(cd "$SOURCE_DIR" && go test ./core ./agent/codex ./agent/claudecode ./platform/feishu && go build -tags 'no_web goolm' -o "$OUTPUT" ./cmd/cc-connect)
 printf '%s\n' "built $OUTPUT"

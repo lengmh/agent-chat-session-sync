@@ -37,8 +37,9 @@ cc-connect ↔ 飞书 → delivered + platform message ID
 - 支持 `stdio` 独立生命周期，以及通过 `codex app-server proxy` 连接持久 daemon 的共享生命周期。
 - `doctor` 校验服务 UID、Unix Socket 类型/owner/mode/group/父目录和 App Server 配置一致性。
 
-当前发布版只实现 `Codex + 飞书`，并依赖 cc-connect 的 Unix Socket API，因此运行环境是 macOS/Linux。
-Claude Code、其他聊天平台和 Windows transport 已留出适配边界，但尚未宣称可用。
+`0.4.0` 实现 `Codex + 飞书` 与 `Claude Code + 飞书`，并依赖 cc-connect 的 Unix Socket API，因此运行环境是 macOS/Linux。
+同一个飞书 Bot 同时服务 Codex 与 Claude Code 时，两个项目必须启用 `binding_routing = true`；worker 会在 cc-connect
+启动或 Socket 重建后，从 SQLite 重放 binding，使每个动态创建的群只进入所属 Agent engine。
 
 ## 架构
 
@@ -57,13 +58,13 @@ src/agent_chat_session_sync/
 └── provenance.py            # 源码/构建包/Hook import 版本证明
 ```
 
-各层的边界刻意保持简单：未来的 `ClaudeCodeAdapter` 不应包含飞书逻辑，新的平台适配器也不应解析 Codex rollout。
+各层保持独立：`ClaudeCodeAdapter` 不包含飞书逻辑，平台适配器也不解析 Codex rollout 或 Claude transcript。
 
 ## 前置条件
 
 1. Python 3.11 或更高版本。
-2. Codex Desktop/CLI 已能产生本地 rollout 文件。
-3. `cc-connect v1.4.1` 已配置至少一个 Codex + 飞书项目。
+2. Codex Desktop/CLI 或 Claude Code 已能产生本地会话文件。
+3. `cc-connect v1.4.1` 已配置对应的 Codex/Claude Code + 飞书项目。
 4. 飞书应用具备建群、读群和发消息权限，`allow_from` 至少包含一个具体 `open_id`，不能只有 `*`。
 5. cc-connect 已应用本仓库的 `/sessions/bind-agent` 扩展。
 
@@ -94,6 +95,33 @@ app_id = "cli_xxx"
 app_secret = "从本机安全配置提供，不要提交到仓库"
 allow_from = "ou_xxx"
 group_reply_all = true
+binding_routing = true
+```
+
+复用同一个 Bot 的 Claude Code 项目使用相同的飞书凭据，并单独配置：
+
+```toml
+[[projects]]
+name = "my-claude-project"
+mode = "multi-workspace"
+base_dir = "/"
+workspace_init_allow_local_paths = true
+
+[projects.agent]
+type = "claudecode"
+
+[projects.agent.options]
+mode = "auto"
+
+[[projects.platforms]]
+type = "feishu"
+
+[projects.platforms.options]
+app_id = "cli_xxx"
+app_secret = "从本机安全配置提供，不要提交到仓库"
+allow_from = "ou_xxx"
+group_reply_all = true
+binding_routing = true
 ```
 
 本地优先同步建议使用 cc-connect 的 `multi-workspace` 模式。若需要同步本机任意目录的新会话，

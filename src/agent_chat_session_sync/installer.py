@@ -12,7 +12,7 @@ import subprocess
 from typing import Any
 
 
-DESCRIPTION = "Mirror local Codex sessions to dedicated cc-connect chat groups."
+DESCRIPTION = "Mirror local Codex and Claude Code sessions to dedicated cc-connect chat groups."
 EVENTS: dict[str, dict[str, Any]] = {
     "SessionStart": {"matcher": "^startup$", "statusMessage": "正在登记飞书同步事件"},
     "UserPromptSubmit": {},
@@ -33,12 +33,12 @@ def installed_executable() -> str | None:
     return shutil.which("agent-chat-session-sync")
 
 
-def hook_command() -> str:
+def hook_command(agent_type: str = "codex") -> str:
     executable = installed_executable()
     if executable:
-        parts = [executable, "hook"]
+        parts = [executable, "hook", "--agent", agent_type]
     else:
-        parts = [sys.executable, "-m", "agent_chat_session_sync", "hook"]
+        parts = [sys.executable, "-m", "agent_chat_session_sync", "hook", "--agent", agent_type]
     return subprocess_command(parts)
 
 
@@ -77,16 +77,17 @@ def _atomic_json(path: Path, value: dict[str, Any]) -> None:
             pass
 
 
-def install_codex_hooks(path: Path | None = None, command: str | None = None) -> Path:
-    path = path or default_hooks_path()
+def _install_hooks(path: Path, command: str) -> Path:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError:
         document = {}
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"refusing to overwrite invalid JSON in {path}: {exc}") from exc
-    hooks = document.setdefault("hooks", {})
-    command = command or hook_command()
+    hooks = document.get("hooks")
+    if not isinstance(hooks, dict):
+        hooks = {}
+        document["hooks"] = hooks
     for event, options in EVENTS.items():
         entries = [entry for entry in hooks.get(event, []) if not _ours(entry)]
         inner: dict[str, Any] = {"type": "command", "command": command, "timeout": 10}
@@ -102,8 +103,19 @@ def install_codex_hooks(path: Path | None = None, command: str | None = None) ->
     return path
 
 
-def uninstall_codex_hooks(path: Path | None = None) -> Path:
-    path = path or default_hooks_path()
+def install_codex_hooks(path: Path | None = None, command: str | None = None) -> Path:
+    return _install_hooks(path or default_hooks_path(), command or hook_command("codex"))
+
+
+def default_claude_settings_path() -> Path:
+    return Path(os.environ.get("CLAUDE_HOME", Path.home() / ".claude")) / "settings.json"
+
+
+def install_claude_hooks(path: Path | None = None, command: str | None = None) -> Path:
+    return _install_hooks(path or default_claude_settings_path(), command or hook_command("claudecode"))
+
+
+def _uninstall_hooks(path: Path) -> Path:
     document = json.loads(path.read_text(encoding="utf-8"))
     hooks = document.get("hooks", {})
     for event in EVENTS:
@@ -114,6 +126,14 @@ def uninstall_codex_hooks(path: Path | None = None) -> Path:
             hooks.pop(event, None)
     _atomic_json(path, document)
     return path
+
+
+def uninstall_codex_hooks(path: Path | None = None) -> Path:
+    return _uninstall_hooks(path or default_hooks_path())
+
+
+def uninstall_claude_hooks(path: Path | None = None) -> Path:
+    return _uninstall_hooks(path or default_claude_settings_path())
 
 
 WORKER_LABEL = "com.agent-chat-session-sync.worker"
@@ -143,6 +163,7 @@ def install_worker_service(data_dir: Path, executable: str | None = None) -> Pat
         "EnvironmentVariables": {
             "ACSS_DATA_DIR": str(data_dir),
             "CODEX_HOME": os.environ.get("CODEX_HOME", str(Path.home() / ".codex")),
+            "CLAUDE_HOME": os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")),
             "CC_CONNECT_CONFIG": os.environ.get(
                 "CC_CONNECT_CONFIG", str(Path.home() / ".cc-connect/config.toml")
             ),

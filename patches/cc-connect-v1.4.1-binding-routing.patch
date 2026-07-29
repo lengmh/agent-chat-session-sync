@@ -1,0 +1,205 @@
+diff --git a/core/api.go b/core/api.go
+index 71394ed4..2be86e45 100644
+--- a/core/api.go
++++ b/core/api.go
+@@ -325,6 +325,10 @@ type BindAgentSessionRequest struct {
+ }
+ 
+ func (s *APIServer) handleBindAgentSession(w http.ResponseWriter, r *http.Request) {
++	if r.Method == http.MethodGet {
++		apiJSON(w, http.StatusOK, map[string]any{"capabilities": []string{"attach_agent_session", "binding_routing"}})
++		return
++	}
+ 	if r.Method != http.MethodPost {
+ 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+ 		return
+@@ -413,6 +413,7 @@ func (s *APIServer) handleBindAgentSession(w http.ResponseWriter, r *http.Reques
+ 		engine.workspaceBindings.Bind("project:"+engine.name, bindingChannelKey, name, bindingWorkDir)
+ 	}
+ 	session := sessions.SwitchToAgentSession(req.SessionKey, req.SessionID, agent.Name(), name)
++	engine.BindSessionRoute(req.SessionKey)
+ 	apiJSON(w, http.StatusOK, map[string]string{
+ 		"status":           "ok",
+ 		"session_key":      req.SessionKey,
+diff --git a/core/api_test.go b/core/api_test.go
+index 1f766921..b7186157 100644
+--- a/core/api_test.go
++++ b/core/api_test.go
+@@ -180,6 +180,35 @@ func TestHandleBindAgentSession(t *testing.T) {
+ 	}
+ }
+ 
++type routeRecordingPlatform struct {
++	stubPlatformEngine
++	keys []string
++}
++
++func (p *routeRecordingPlatform) BindSessionRoute(key string) {
++	p.keys = append(p.keys, key)
++}
++
++func TestHandleBindAgentSessionRegistersPlatformRoute(t *testing.T) {
++	platform := &routeRecordingPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
++	engine := NewEngine("projectA", &stubAgent{}, []Platform{platform}, "", LangEnglish)
++	api := &APIServer{engines: map[string]*Engine{"projectA": engine}}
++	body, err := json.Marshal(BindAgentSessionRequest{
++		Project: "projectA", SessionKey: "feishu:oc_chat:ou_user", SessionID: "native-session",
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	rec := httptest.NewRecorder()
++	api.handleBindAgentSession(rec, httptest.NewRequest(http.MethodPost, "/sessions/bind-agent", bytes.NewReader(body)))
++	if rec.Code != http.StatusOK {
++		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
++	}
++	if len(platform.keys) != 1 || platform.keys[0] != "feishu:oc_chat:ou_user" {
++		t.Fatalf("registered routes = %#v", platform.keys)
++	}
++}
++
+ func TestHandleBindAgentSessionWithWorkspace(t *testing.T) {
+ 	baseDir := t.TempDir()
+ 	workDir := filepath.Join(baseDir, "repo")
+diff --git a/core/engine.go b/core/engine.go
+index 79e2892c..5f4b2a31 100644
+--- a/core/engine.go
++++ b/core/engine.go
+@@ -745,6 +745,16 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
+ 	return e
+ }
+ 
++// BindSessionRoute tells every routing-aware platform owned by this engine
++// that future messages for sessionKey belong to this project.
++func (e *Engine) BindSessionRoute(sessionKey string) {
++	for _, platform := range e.platforms {
++		if binder, ok := platform.(SessionRouteBinder); ok {
++			binder.BindSessionRoute(sessionKey)
++		}
++	}
++}
++
+ // DefaultWorkspaceIdleTimeout is the default time a workspace can be idle
+ // before the reaper reclaims it.
+ const DefaultWorkspaceIdleTimeout = 15 * time.Minute
+diff --git a/core/interfaces.go b/core/interfaces.go
+index e92182ac..bf592f05 100644
+--- a/core/interfaces.go
++++ b/core/interfaces.go
+@@ -15,6 +15,12 @@ type Platform interface {
+ 	Stop() error
+ }
+ 
++// SessionRouteBinder is implemented by shared-credential platforms that must
++// route an externally attached session to exactly one project engine.
++type SessionRouteBinder interface {
++	BindSessionRoute(sessionKey string)
++}
++
+ // ErrNotSupported indicates a platform doesn't support a particular operation.
+ var ErrNotSupported = errors.New("operation not supported by this platform")
+ 
+diff --git a/platform/feishu/feishu.go b/platform/feishu/feishu.go
+index bafedee0..790a8004 100644
+--- a/platform/feishu/feishu.go
++++ b/platform/feishu/feishu.go
+@@ -125,6 +125,8 @@ type Platform struct {
+ 	doneEmoji                  string
+ 	allowFrom                  string
+ 	allowChat                  string
++	bindingRouting             bool
++	boundChats                 sync.Map // chat_id -> struct{}
+ 	groupOnly                  bool
+ 	groupReplyAll              bool
+ 	respondToAtEveryoneAndHere bool
+@@ -296,5 +298,6 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
+ 	allowFrom, _ := opts["allow_from"].(string)
+ 	core.CheckAllowFrom(name, allowFrom)
+ 	allowChat, _ := opts["allow_chat"].(string)
++	bindingRouting, _ := opts["binding_routing"].(bool)
+ 	groupOnly, _ := opts["group_only"].(bool)
+ 	groupReplyAll, _ := opts["group_reply_all"].(bool)
+@@ -376,5 +379,6 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
+ 		doneEmoji:                  doneEmoji,
+ 		allowFrom:                  allowFrom,
+ 		allowChat:                  allowChat,
++		bindingRouting:             bindingRouting,
+ 		groupOnly:                  groupOnly,
+ 		groupReplyAll:              groupReplyAll,
+@@ -404,4 +408,22 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
+ 
+ func (p *Platform) Name() string { return p.platformName }
+ 
++func (p *Platform) BindSessionRoute(sessionKey string) {
++	parts := strings.Split(sessionKey, ":")
++	if len(parts) < 2 || parts[1] == "" {
++		return
++	}
++	p.boundChats.Store(parts[1], struct{}{})
++}
++
++func (p *Platform) chatAllowed(chatID string) bool {
++	if !p.bindingRouting {
++		return core.AllowList(p.allowChat, chatID)
++	}
++	if _, ok := p.boundChats.Load(chatID); ok {
++		return true
++	}
++	return strings.TrimSpace(p.allowChat) != "" && core.AllowList(p.allowChat, chatID)
++}
++
+ func (p *Platform) ProgressStyle() string { return p.progressStyle }
+@@ -643,7 +665,7 @@ func (p *Platform) onCardAction(event *callback.CardActionTriggerEvent) (*callba
+ 
+ 	// Check allow_chat filter: skip card actions from chats this platform doesn't own.
+ 	if event.Event.Context != nil && event.Event.Context.OpenChatID != "" {
+-		if !core.AllowList(p.allowChat, event.Event.Context.OpenChatID) {
++		if !p.chatAllowed(event.Event.Context.OpenChatID) {
+ 			return nil, nil
+ 		}
+ 	}
+@@ -1218,7 +1240,7 @@ func (p *Platform) onMessageRecalled(_ context.Context, event *larkim.P2MessageR
+ 		slog.Debug(p.tag()+": recall event without message id", "chat_id", chatID)
+ 		return nil
+ 	}
+-	if chatID != "" && !core.AllowList(p.allowChat, chatID) {
++	if chatID != "" && !p.chatAllowed(chatID) {
+ 		slog.Debug(p.tag()+": recall event from unauthorized chat", "chat_id", chatID, "message_id", messageID)
+ 		return nil
+ 	}
+@@ -1335,7 +1357,7 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
+ 		return nil
+ 	}
+ 
+-	if chatType == "group" && !core.AllowList(p.allowChat, chatID) {
++	if chatType == "group" && !p.chatAllowed(chatID) {
+ 		slog.Debug(p.tag()+": message from unauthorized chat", "chat_id", chatID)
+ 		return nil
+ 	}
+diff --git a/platform/feishu/feishu_test.go b/platform/feishu/feishu_test.go
+index 8c0eae91..62743401 100644
+--- a/platform/feishu/feishu_test.go
++++ b/platform/feishu/feishu_test.go
+@@ -15,4 +15,22 @@ import (
+ 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
+ )
+ 
++func TestBindingRoutingAllowsOnlyRegisteredOrStaticChats(t *testing.T) {
++	p := &Platform{bindingRouting: true, allowChat: "oc_static"}
++	if p.chatAllowed("oc_unbound") {
++		t.Fatal("unbound chat was allowed while binding routing is enabled")
++	}
++	p.BindSessionRoute("feishu:oc_bound:ou_user")
++	if !p.chatAllowed("oc_bound") {
++		t.Fatal("bound chat was rejected")
++	}
++	if !p.chatAllowed("oc_static") {
++		t.Fatal("explicit static allow_chat was rejected")
++	}
++	legacy := &Platform{bindingRouting: false, allowChat: ""}
++	if !legacy.chatAllowed("oc_any") {
++		t.Fatal("legacy empty allow_chat behavior changed")
++	}
++}
++
+ func TestOnMessageRecalledDispatchesCoreRecallMessage(t *testing.T) {

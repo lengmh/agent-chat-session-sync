@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Callable
 
-from .agents.codex import CodexAdapter
+from .agents.base import AgentAdapter
 from .bridges.cc_connect import CCConnectBridge
 from .config import matching_project
 from .errors import PlatformAPIError
@@ -18,7 +18,7 @@ PlatformFactory = Callable[[Project], FeishuPlatform]
 class SessionCoordinator:
     def __init__(
         self,
-        agent: CodexAdapter,
+        agent: AgentAdapter,
         bridge: CCConnectBridge,
         store: BindingStore,
         config: dict,
@@ -36,7 +36,7 @@ class SessionCoordinator:
         session_id = self.agent.resolve_stable_session_id(event)
         if not session_id or not event.cwd:
             return None
-        project = matching_project(self.config, event.cwd)
+        project = matching_project(self.config, event.cwd, event.agent_type)
         if project is None:
             self.logger(f"skip session={session_id}: cwd is not covered by a Feishu cc-connect project")
             return None
@@ -49,7 +49,8 @@ class SessionCoordinator:
         return binding
 
     def _ensure_binding(self, session_id: str, event: AgentEvent, project: Project, platform: FeishuPlatform) -> Binding:
-        existing = self.store.get(session_id)
+        binding_key = self.agent.binding_key(session_id)
+        existing = self.store.get(binding_key)
         if existing and platform.validate_chat(existing.chat_id):
             return existing
         generation = (existing.generation + 1) if existing else 1
@@ -60,7 +61,7 @@ class SessionCoordinator:
     def _create(
         self, session_id: str, event: AgentEvent, project: Project, platform: FeishuPlatform, generation: int
     ) -> Binding:
-        title = self.agent.chat_title(session_id, event.cwd)
+        title = self.agent.chat_title(session_id, event.cwd, event)
         chat_id = platform.create_session_chat(session_id, event.cwd, generation, title)
         session_key = platform.session_key(chat_id)
         self.bridge.attach_agent_session(project.name, session_key, session_id, title, event.cwd)
@@ -73,7 +74,7 @@ class SessionCoordinator:
             created_at=datetime.now().astimezone().isoformat(timespec="seconds"),
             title=title,
         )
-        self.store.bind(session_id, binding)
+        self.store.bind(self.agent.binding_key(session_id), binding)
         self.logger(f"created session={session_id} chat={chat_id} project={project.name} generation={generation}")
         return binding
 
@@ -100,7 +101,7 @@ class SessionCoordinator:
     def _sync_title(
         self, session_id: str, event: AgentEvent, platform: FeishuPlatform, binding: Binding
     ) -> Binding:
-        title = self.agent.chat_title(session_id, event.cwd)
+        title = self.agent.chat_title(session_id, event.cwd, event)
         if binding.title == title:
             return binding
         platform.rename_chat(binding.chat_id, title)
@@ -113,12 +114,12 @@ class SessionCoordinator:
             created_at=binding.created_at,
             title=title,
         )
-        self.store.bind(session_id, updated)
+        self.store.bind(self.agent.binding_key(session_id), updated)
         self.logger(f"renamed session={session_id} chat={binding.chat_id} title={title!r}")
         return updated
 
     def _discard(self, session_id: str, binding: Binding, reason: str) -> None:
-        if self.store.invalidate(session_id, binding.chat_id):
+        if self.store.invalidate(self.agent.binding_key(session_id), binding.chat_id):
             self.logger(f"removed stale mapping session={session_id} chat={binding.chat_id} reason={reason}")
 
     def _send_with_recovery(
