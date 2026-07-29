@@ -12,6 +12,7 @@ import sys
 from . import __version__
 from .acceptance import LiveAcceptance
 from .bridges.cc_connect import CCConnectBridge
+from .cc_configurator import configure_claude_project
 from .config import Settings, load_cc_connect_config
 from .installer import (
     install_codex_hooks,
@@ -330,6 +331,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     migrate = subparsers.add_parser("migrate-state", help="reattach bindings from a legacy state file")
     migrate.add_argument("--from", dest="source", type=Path, required=True)
+    configure_claude = subparsers.add_parser(
+        "configure-claude", help="clone Feishu settings into a routed Claude Code project"
+    )
+    configure_claude.add_argument("--project-name", default="")
     return parser
 
 
@@ -397,6 +402,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "migrate-state":
         return _migrate_state(settings, args.source)
+    if args.command == "configure-claude":
+        backup, name, created = configure_claude_project(settings.cc_config, args.project_name)
+        print(f"{'created' if created else 'updated'} Claude project: {name}; backup: {backup}")
+        return 0
     return 2
 
 
