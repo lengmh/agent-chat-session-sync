@@ -24,8 +24,15 @@ def default_hooks_path() -> Path:
     return Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "hooks.json"
 
 
+def installed_executable() -> str | None:
+    adjacent = Path(sys.executable).resolve().parent / "agent-chat-session-sync"
+    if adjacent.is_file() and os.access(adjacent, os.X_OK):
+        return str(adjacent)
+    return shutil.which("agent-chat-session-sync")
+
+
 def hook_command() -> str:
-    executable = shutil.which("agent-chat-session-sync")
+    executable = installed_executable()
     if executable:
         parts = [executable, "hook"]
     else:
@@ -117,7 +124,7 @@ def worker_plist_path() -> Path:
 def install_worker_service(data_dir: Path, executable: str | None = None) -> Path:
     if sys.platform != "darwin":
         raise RuntimeError("automatic worker service installation currently supports macOS LaunchAgent")
-    executable = executable or shutil.which("agent-chat-session-sync")
+    executable = executable or installed_executable()
     if not executable:
         raise RuntimeError("agent-chat-session-sync executable not found")
     path = worker_plist_path()

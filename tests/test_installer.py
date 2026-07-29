@@ -2,8 +2,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
-from agent_chat_session_sync.installer import install_codex_hooks, uninstall_codex_hooks
+from agent_chat_session_sync.installer import installed_executable, install_codex_hooks, uninstall_codex_hooks
 
 
 class InstallerTests(unittest.TestCase):
@@ -34,3 +35,16 @@ class InstallerTests(unittest.TestCase):
             uninstall_codex_hooks(path)
             document = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(document["hooks"], {})
+
+    def test_installed_executable_uses_current_venv_even_when_path_omits_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            bin_dir = Path(directory) / "bin"
+            bin_dir.mkdir()
+            python = bin_dir / "python"
+            command = bin_dir / "agent-chat-session-sync"
+            python.touch()
+            command.touch(mode=0o755)
+            with mock.patch("agent_chat_session_sync.installer.sys.executable", str(python)), mock.patch(
+                "agent_chat_session_sync.installer.shutil.which", return_value=None
+            ):
+                self.assertEqual(installed_executable(), str(command.resolve()))
