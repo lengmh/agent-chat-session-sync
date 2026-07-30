@@ -10,7 +10,10 @@ from typing import Any
 from ..errors import PlatformAPIError
 
 
-STALE_CHAT_CODES = {230001, 230002, 99992356}
+# Feishu uses 232009 when a formerly valid chat has been dissolved.  Treat it
+# like the other missing/unavailable-chat responses so the coordinator can
+# invalidate the durable binding and recreate the per-session group.
+STALE_CHAT_CODES = {230001, 230002, 232009, 99992356}
 
 
 class FeishuPlatform:
