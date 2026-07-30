@@ -21,6 +21,7 @@ cc-connect ↔ 飞书 → delivered + platform message ID
 ## 当前能力
 
 - 一个本地 Codex 任务对应一个独立飞书群。
+- 群名固定带 Agent 标识：`Codex · 任务名` 或 `Claude · 任务名`。
 - Hook 只负责可靠收件；解析、建群和发送由常驻 worker 异步执行。
 - SQLite inbox/outbox 支持失败重试、重启续传、历史补发和幂等去重。
 - rollout 延迟创建或 transcript 暂时缺失时保留事件；多候选进入 `waiting_confirmation`，不猜测绑定。
@@ -72,7 +73,7 @@ src/agent_chat_session_sync/
 
 ```toml
 [[projects]]
-name = "my-project"
+name = "local-codex"
 mode = "multi-workspace"
 base_dir = "/"
 workspace_init_allow_local_paths = true
@@ -102,7 +103,7 @@ binding_routing = true
 
 ```toml
 [[projects]]
-name = "my-claude-project"
+name = "local-claude"
 mode = "multi-workspace"
 base_dir = "/"
 workspace_init_allow_local_paths = true

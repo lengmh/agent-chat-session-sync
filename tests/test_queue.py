@@ -88,6 +88,14 @@ class EventDatabaseTests(unittest.TestCase):
             database.put_binding("claudecode:session", binding)
             self.assertEqual(database.list_bindings(), [("claudecode:session", binding)])
 
+    def test_binding_projects_can_be_renamed_atomically(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            database = EventDatabase(Path(raw) / "events.sqlite3")
+            binding = Binding("oc_1", "feishu:oc_1:ou_1", "legacy", "/work", 1, "now")
+            database.put_binding("session", binding)
+            self.assertEqual(database.rename_binding_project("legacy", "local-codex"), 1)
+            self.assertEqual(database.get_binding("session").project, "local-codex")
+
 
 if __name__ == "__main__":
     unittest.main()

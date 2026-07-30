@@ -15,6 +15,7 @@ FEISHU_OPTIONS_RE = re.compile(
     r"^\[projects\.platforms\.options\]\s*$)(?P<body>.*?)(?=^\[|\Z)",
     re.MULTILINE | re.DOTALL,
 )
+PROJECT_BLOCK_RE = re.compile(r"^\[\[projects\]\].*?(?=^\[\[projects\]\]|\Z)", re.MULTILINE | re.DOTALL)
 
 
 def _toml_value(value: Any) -> str:
@@ -40,6 +41,27 @@ def _enable_binding_routing(text: str) -> str:
     return FEISHU_OPTIONS_RE.sub(replace, text)
 
 
+def _atomic_replace(path: Path, updated: str, backup_suffix: str) -> Path:
+    tomllib.loads(updated)
+    backup = path.with_suffix(path.suffix + backup_suffix)
+    if not backup.exists():
+        shutil.copy2(path, backup)
+    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(updated)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_name, path.stat().st_mode & 0o777)
+        os.replace(tmp_name, path)
+    finally:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+    return backup
+
+
 def configure_claude_project(path: Path, project_name: str = "") -> tuple[Path, str, bool]:
     """Atomically enable shared-Bot routing and add one Claude Code project."""
     original = path.read_text(encoding="utf-8")
@@ -63,7 +85,7 @@ def configure_claude_project(path: Path, project_name: str = "") -> tuple[Path, 
 
     updated = _enable_binding_routing(original)
     created = existing is None
-    name = str(existing.get("name", "")) if existing else (project_name or f"{source.get('name', 'agent')}-claude")
+    name = str(existing.get("name", "")) if existing else (project_name or "local-claude")
     if created:
         platform = next(item for item in source["platforms"] if item.get("type") == "feishu")
         options = dict(platform.get("options", {}))
@@ -80,21 +102,43 @@ def configure_claude_project(path: Path, project_name: str = "") -> tuple[Path, 
         lines.extend(f"{key} = {_toml_value(value)}" for key, value in options.items())
         updated = updated.rstrip() + "\n" + "\n".join(lines) + "\n"
 
-    tomllib.loads(updated)
-    backup = path.with_suffix(path.suffix + ".pre-claude.bak")
-    if not backup.exists():
-        shutil.copy2(path, backup)
-    fd, tmp_name = tempfile.mkstemp(prefix=path.name + ".", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(updated)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.chmod(tmp_name, path.stat().st_mode & 0o777)
-        os.replace(tmp_name, path)
-    finally:
-        try:
-            os.unlink(tmp_name)
-        except FileNotFoundError:
-            pass
+    backup = _atomic_replace(path, updated, ".pre-claude.bak")
     return backup, name, created
+
+
+def rename_agent_projects(
+    path: Path,
+    codex_name: str = "local-codex",
+    claude_name: str = "local-claude",
+) -> tuple[Path, dict[str, str]]:
+    """Rename Feishu-backed Agent engines without rewriting credentials."""
+    original = path.read_text(encoding="utf-8")
+    desired = {"codex": codex_name, "claudecode": claude_name}
+    renamed: dict[str, str] = {}
+
+    def replace(match: re.Match[str]) -> str:
+        block = match.group(0)
+        parsed = tomllib.loads(block)["projects"][0]
+        agent_type = str(parsed.get("agent", {}).get("type", "codex")).lower()
+        if agent_type not in desired or not any(
+            platform.get("type") == "feishu" for platform in parsed.get("platforms", [])
+        ):
+            return block
+        old_name = str(parsed.get("name", ""))
+        new_name = desired[agent_type]
+        if not old_name or old_name == new_name:
+            return block
+        renamed[old_name] = new_name
+        return re.sub(
+            r"(?m)^\s*name\s*=.*$",
+            f"name = {_toml_value(new_name)}",
+            block,
+            count=1,
+        )
+
+    updated = PROJECT_BLOCK_RE.sub(replace, original)
+    names = [str(item.get("name", "")) for item in tomllib.loads(updated).get("projects", [])]
+    if len(names) != len(set(names)):
+        raise RuntimeError("renaming would create duplicate cc-connect project names")
+    backup = _atomic_replace(path, updated, ".pre-project-rename.bak")
+    return backup, renamed

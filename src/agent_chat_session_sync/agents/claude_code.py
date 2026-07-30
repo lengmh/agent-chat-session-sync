@@ -59,7 +59,7 @@ class ClaudeCodeAdapter:
         explicit = event.session_title.strip() if event else ""
         prompt = self._first_prompt(session_id)
         if explicit:
-            title = f"Claude · {explicit}"
+            title = explicit if explicit.startswith("Claude · ") else f"Claude · {explicit}"
         elif prompt:
             single_line = " ".join(prompt.split())
             title = f"Claude · {single_line}"

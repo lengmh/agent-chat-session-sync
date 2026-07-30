@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-chat-session-sync"
-version = "0.4.0"
+version = "0.4.1"
 description = "Attach local AI-agent sessions to dedicated chat groups through cc-connect"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -126,6 +126,6 @@ class CoordinatorTests(unittest.TestCase):
 
             result = coordinator.handle(start_event)
 
-            self.assertEqual(platform.renamed, [("oc_old", "绘画任务")])
-            self.assertEqual(result.title, "绘画任务")
-            self.assertEqual(store.get(rollout_id).title, "绘画任务")
+            self.assertEqual(platform.renamed, [("oc_old", "Codex · 绘画任务")])
+            self.assertEqual(result.title, "Codex · 绘画任务")
+            self.assertEqual(store.get(rollout_id).title, "Codex · 绘画任务")

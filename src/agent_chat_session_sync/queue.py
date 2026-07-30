@@ -431,6 +431,14 @@ class EventDatabase:
             for row in rows
         ]
 
+    def rename_binding_project(self, old_name: str, new_name: str) -> int:
+        with self.connect() as db:
+            cursor = db.execute(
+                "UPDATE bindings SET project=?,updated_at=? WHERE project=?",
+                (new_name, time.time(), old_name),
+            )
+        return cursor.rowcount
+
     def invalidate_binding(self, rollout_id: str, expected_chat_id: str) -> bool:
         with self.connect() as db:
             cursor = db.execute(

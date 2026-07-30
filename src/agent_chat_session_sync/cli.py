@@ -12,7 +12,7 @@ import sys
 from . import __version__
 from .acceptance import LiveAcceptance
 from .bridges.cc_connect import CCConnectBridge
-from .cc_configurator import configure_claude_project
+from .cc_configurator import configure_claude_project, rename_agent_projects
 from .config import Settings, load_cc_connect_config
 from .installer import (
     install_codex_hooks,
@@ -335,6 +335,11 @@ def build_parser() -> argparse.ArgumentParser:
         "configure-claude", help="clone Feishu settings into a routed Claude Code project"
     )
     configure_claude.add_argument("--project-name", default="")
+    rename_projects = subparsers.add_parser(
+        "rename-projects", help="rename Feishu Agent engines and migrate durable bindings"
+    )
+    rename_projects.add_argument("--codex-name", default="local-codex")
+    rename_projects.add_argument("--claude-name", default="local-claude")
     return parser
 
 
@@ -405,6 +410,16 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "configure-claude":
         backup, name, created = configure_claude_project(settings.cc_config, args.project_name)
         print(f"{'created' if created else 'updated'} Claude project: {name}; backup: {backup}")
+        return 0
+    if args.command == "rename-projects":
+        backup, renamed = rename_agent_projects(
+            settings.cc_config, args.codex_name, args.claude_name
+        )
+        database = EventDatabase(settings.database_path)
+        migrated = {
+            old: database.rename_binding_project(old, new) for old, new in renamed.items()
+        }
+        print(f"renamed projects: {renamed}; migrated bindings: {migrated}; backup: {backup}")
         return 0
     return 2
 

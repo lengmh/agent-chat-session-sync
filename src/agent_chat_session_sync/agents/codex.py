@@ -154,4 +154,9 @@ class CodexAdapter:
         return title
 
     def chat_title(self, session_id: str, cwd: str, event: AgentEvent | None = None) -> str:
-        return (self.session_title(session_id) or f"Codex · {Path(cwd).name} · {session_id[:8]}")[:60]
+        native_title = (self.session_title(session_id) or "").strip()
+        if native_title:
+            title = native_title if native_title.startswith("Codex · ") else f"Codex · {native_title}"
+        else:
+            title = f"Codex · {Path(cwd).name} · {session_id[:8]}"
+        return title[:60]

@@ -112,4 +112,4 @@ class CodexAdapterTests(unittest.TestCase):
                 encoding="utf-8",
             )
             adapter = CodexAdapter(codex_home, lambda _: None)
-            self.assertEqual(adapter.chat_title(session_id, "/tmp/repo"), "产品化本地会话编排扩展")
+            self.assertEqual(adapter.chat_title(session_id, "/tmp/repo"), "Codex · 产品化本地会话编排扩展")
