@@ -16,6 +16,14 @@ The patch also carries two independent Codex extensions:
 ## Contract
 
 `POST /sessions/bind-agent` accepts `project`, `session_key`, `session_id`, an optional `session_name`, and an optional `work_dir`.
+
+Before an existing Codex App Server process is reused for a new platform
+message, cc-connect fingerprints the rollout file using its byte offset and
+latest turn ID. If Desktop or another client has appended a different turn,
+the old process is closed synchronously and the same thread ID is resumed
+before `turn/start`. Delayed writes belonging to the already observed turn only
+advance the fingerprint and do not cause a restart. This behavior is reported
+as the `external_session_refresh` capability by `GET /sessions/bind-agent`.
 When `work_dir` is supplied, the project must use multi-workspace mode. The handler validates that the directory exists under the configured `base_dir`, persists the channel-to-workspace binding, and stores the Agent session ID in that workspace's own session manager.
 
 Responses:

@@ -1,0 +1,446 @@
+diff --git a/agent/codex/appserver_session.go b/agent/codex/appserver_session.go
+index 4567a216..f2130237 100644
+--- a/agent/codex/appserver_session.go
++++ b/agent/codex/appserver_session.go
+@@ -2,6 +2,7 @@ package codex
+ 
+ import (
+ 	"bufio"
++	"bytes"
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
+@@ -187,6 +188,16 @@ type appServerSession struct {
+ 	runtimeMu sync.RWMutex
+ 	usage     *core.UsageReport
+ 	context   *core.ContextUsage
++
++	rolloutMu       sync.Mutex
++	rolloutPath     string
++	rolloutBaseline rolloutFingerprint
++}
++
++type rolloutFingerprint struct {
++	size       int64
++	modTimeNS  int64
++	lastTurnID string
+ }
+ 
+ const (
+@@ -237,6 +248,9 @@ func newAppServerSession(ctx context.Context, url, lifecycle, socketPath, permis
+ 		_ = s.Close()
+ 		return nil, err
+ 	}
++	if err := s.recordRolloutBaseline(""); err != nil {
++		slog.Debug("codex app-server: initial rollout fingerprint unavailable", "error", err)
++	}
+ 	if err := s.refreshUsage(context.Background()); err != nil {
+ 		slog.Debug("codex app-server: initial rate limit fetch failed", "error", err)
+ 	}
+@@ -244,6 +258,140 @@ func newAppServerSession(ctx context.Context, url, lifecycle, socketPath, permis
+ 	return s, nil
+ }
+ 
++// ExternallyUpdated reports whether another Codex client appended a newer turn
++// after this App Server session's last observed turn. Same-turn trailing writes
++// are absorbed into the baseline because persistence can finish just after the
++// turn/completed notification.
++func (s *appServerSession) ExternallyUpdated() (bool, error) {
++	s.rolloutMu.Lock()
++	defer s.rolloutMu.Unlock()
++
++	current, err := s.readRolloutFingerprintLocked()
++	if err != nil {
++		return false, err
++	}
++	baseline := s.rolloutBaseline
++	if baseline.size == 0 {
++		s.rolloutBaseline = current
++		return false, nil
++	}
++	if current.size == baseline.size && current.modTimeNS == baseline.modTimeNS {
++		return false, nil
++	}
++	if current.size < baseline.size {
++		return true, nil
++	}
++	if baseline.lastTurnID != "" && current.lastTurnID != "" {
++		if current.lastTurnID != baseline.lastTurnID {
++			return true, nil
++		}
++		// A delayed append from the turn we already consumed is not external.
++		s.rolloutBaseline = current
++		return false, nil
++	}
++	return current.size != baseline.size, nil
++}
++
++func (s *appServerSession) recordRolloutBaseline(completedTurnID string) error {
++	s.rolloutMu.Lock()
++	defer s.rolloutMu.Unlock()
++	fingerprint, err := s.readRolloutFingerprintLocked()
++	if err != nil {
++		return err
++	}
++	if ownTurnID := strings.TrimSpace(completedTurnID); ownTurnID != "" {
++		// The live process knows which turn it completed. Prefer that identity
++		// even if another client raced an append between notification and stat;
++		// the next pre-send check will then detect the other turn.
++		fingerprint.lastTurnID = ownTurnID
++	}
++	s.rolloutBaseline = fingerprint
++	return nil
++}
++
++func (s *appServerSession) readRolloutFingerprintLocked() (rolloutFingerprint, error) {
++	threadID := s.CurrentSessionID()
++	if threadID == "" {
++		return rolloutFingerprint{}, fmt.Errorf("thread id is empty")
++	}
++	if s.rolloutPath == "" {
++		s.rolloutPath = findSessionFile(threadID, s.codexHome)
++	}
++	if s.rolloutPath == "" {
++		return rolloutFingerprint{}, fmt.Errorf("rollout file not found for thread %s", threadID)
++	}
++	file, err := os.Open(s.rolloutPath)
++	if err != nil {
++		return rolloutFingerprint{}, fmt.Errorf("open rollout fingerprint: %w", err)
++	}
++	defer file.Close()
++	stat, err := file.Stat()
++	if err != nil {
++		return rolloutFingerprint{}, fmt.Errorf("stat rollout fingerprint: %w", err)
++	}
++	const tailBytes int64 = 1024 * 1024
++	start := stat.Size() - tailBytes
++	if start < 0 {
++		start = 0
++	}
++	if _, err := file.Seek(start, io.SeekStart); err != nil {
++		return rolloutFingerprint{}, fmt.Errorf("seek rollout fingerprint: %w", err)
++	}
++	tail, err := io.ReadAll(file)
++	if err != nil {
++		return rolloutFingerprint{}, fmt.Errorf("read rollout fingerprint: %w", err)
++	}
++	if start > 0 {
++		if newline := bytes.IndexByte(tail, '\n'); newline >= 0 {
++			tail = tail[newline+1:]
++		}
++	}
++	return rolloutFingerprint{
++		size:       stat.Size(),
++		modTimeNS:  stat.ModTime().UnixNano(),
++		lastTurnID: latestRolloutTurnID(tail),
++	}, nil
++}
++
++func latestRolloutTurnID(tail []byte) string {
++	lines := bytes.Split(tail, []byte{'\n'})
++	for i := len(lines) - 1; i >= 0; i-- {
++		if len(bytes.TrimSpace(lines[i])) == 0 {
++			continue
++		}
++		var value any
++		if json.Unmarshal(lines[i], &value) == nil {
++			if turnID := nestedTurnID(value); turnID != "" {
++				return turnID
++			}
++		}
++	}
++	return ""
++}
++
++func nestedTurnID(value any) string {
++	switch typed := value.(type) {
++	case map[string]any:
++		for _, key := range []string{"turn_id", "turnId"} {
++			if turnID, ok := typed[key].(string); ok && strings.TrimSpace(turnID) != "" {
++				return strings.TrimSpace(turnID)
++			}
++		}
++		for _, child := range typed {
++			if turnID := nestedTurnID(child); turnID != "" {
++				return turnID
++			}
++		}
++	case []any:
++		for _, child := range typed {
++			if turnID := nestedTurnID(child); turnID != "" {
++				return turnID
++			}
++		}
++	}
++	return ""
++}
++
+ func (s *appServerSession) connect() error {
+ 	args, err := appServerCommandArgs(s.lifecycle, s.url, s.socketPath)
+ 	if err != nil {
+@@ -1582,8 +1730,12 @@ func (s *appServerSession) completeTurn() {
+ 		s.stateMu.Unlock()
+ 		return
+ 	}
++	completedTurnID := s.currentTurn
+ 	s.currentTurn = ""
+ 	s.stateMu.Unlock()
++	if err := s.recordRolloutBaseline(completedTurnID); err != nil {
++		slog.Debug("codex app-server: completed rollout fingerprint unavailable", "error", err)
++	}
+ 	s.flushPendingAsText()
+ 	s.emit(core.Event{Type: core.EventResult, SessionID: s.CurrentSessionID(), Done: true})
+ }
+diff --git a/agent/codex/appserver_session_test.go b/agent/codex/appserver_session_test.go
+index eef856a8..f2f5d5ba 100644
+--- a/agent/codex/appserver_session_test.go
++++ b/agent/codex/appserver_session_test.go
+@@ -5,6 +5,8 @@ import (
+ 	"context"
+ 	"encoding/json"
+ 	"io"
++	"os"
++	"path/filepath"
+ 	"strings"
+ 	"sync"
+ 	"testing"
+@@ -13,6 +15,57 @@ import (
+ 	"github.com/chenhg5/cc-connect/core"
+ )
+ 
++func TestAppServerSession_ExternalDesktopTurnRequiresResume(t *testing.T) {
++	codexHome := t.TempDir()
++	threadID := "019fab53-93d9-7032-aecf-29b5f9bcc362"
++	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "07", "30")
++	if err := os.MkdirAll(rolloutDir, 0o700); err != nil {
++		t.Fatal(err)
++	}
++	rolloutPath := filepath.Join(rolloutDir, "rollout-test-"+threadID+".jsonl")
++	initial := "{\"type\":\"session_meta\",\"payload\":{\"id\":\"" + threadID + "\"}}\n" +
++		"{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_complete\",\"turn_id\":\"T10\"}}\n"
++	if err := os.WriteFile(rolloutPath, []byte(initial), 0o600); err != nil {
++		t.Fatal(err)
++	}
++
++	s := &appServerSession{codexHome: codexHome}
++	s.threadID.Store(threadID)
++	if err := s.recordRolloutBaseline(""); err != nil {
++		t.Fatalf("record baseline: %v", err)
++	}
++
++	appendRollout := func(line string) {
++		file, err := os.OpenFile(rolloutPath, os.O_APPEND|os.O_WRONLY, 0)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if _, err := file.WriteString(line + "\n"); err != nil {
++			_ = file.Close()
++			t.Fatal(err)
++		}
++		if err := file.Close(); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	// Persistence may trail turn/completed. More bytes from T10 must advance
++	// the baseline without forcing an unnecessary process restart.
++	appendRollout("{\"type\":\"response_item\",\"payload\":{\"turn_id\":\"T10\"}}")
++	updated, err := s.ExternallyUpdated()
++	if err != nil || updated {
++		t.Fatalf("same-turn append: updated=%v err=%v, want false", updated, err)
++	}
++
++	// Desktop then appends a distinct turn. The next platform message must
++	// recycle this process and resume the shared rollout before turn/start.
++	appendRollout("{\"type\":\"event_msg\",\"payload\":{\"turn_id\":\"T11\"}}")
++	updated, err = s.ExternallyUpdated()
++	if err != nil || !updated {
++		t.Fatalf("external turn append: updated=%v err=%v, want true", updated, err)
++	}
++}
++
+ func TestAppServerSession_ApplyThreadRuntimeState(t *testing.T) {
+ 	s := &appServerSession{}
+ 	effort := "xhigh"
+diff --git a/core/api.go b/core/api.go
+index cf345cc3..0a10c7b0 100644
+--- a/core/api.go
++++ b/core/api.go
+@@ -326,5 +326,5 @@ type BindAgentSessionRequest struct {
+ func (s *APIServer) handleBindAgentSession(w http.ResponseWriter, r *http.Request) {
+ 	if r.Method == http.MethodGet {
+-		apiJSON(w, http.StatusOK, map[string]any{"capabilities": []string{"attach_agent_session", "binding_routing"}})
++		apiJSON(w, http.StatusOK, map[string]any{"capabilities": []string{"attach_agent_session", "binding_routing", "external_session_refresh"}})
+ 		return
+ 	}
+diff --git a/core/api_test.go b/core/api_test.go
+index b7186157..31ad6fd9 100644
+--- a/core/api_test.go
++++ b/core/api_test.go
+@@ -180,6 +180,30 @@ func TestHandleBindAgentSession(t *testing.T) {
+ 	}
+ }
+ 
++func TestHandleBindAgentSessionReportsExternalRefreshCapability(t *testing.T) {
++	api := &APIServer{}
++	rec := httptest.NewRecorder()
++	api.handleBindAgentSession(rec, httptest.NewRequest(http.MethodGet, "/sessions/bind-agent", nil))
++	if rec.Code != http.StatusOK {
++		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
++	}
++	var payload struct {
++		Capabilities []string `json:"capabilities"`
++	}
++	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
++		t.Fatal(err)
++	}
++	found := false
++	for _, capability := range payload.Capabilities {
++		if capability == "external_session_refresh" {
++			found = true
++		}
++	}
++	if !found {
++		t.Fatalf("capabilities = %#v, want external_session_refresh", payload.Capabilities)
++	}
++}
++
+ type routeRecordingPlatform struct {
+ 	stubPlatformEngine
+ 	keys []string
+diff --git a/core/engine.go b/core/engine.go
+index 5f4b2a31..fd35c016 100644
+--- a/core/engine.go
++++ b/core/engine.go
+@@ -3908,6 +3908,19 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform,
+ 		// If wantID is empty (/new, cleared session) but the process already has
+ 		// a concrete ID, reusing would keep --resume context — recycle (#238).
+ 		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
++		recycleReason := "agent session mismatch"
++		if !needRecycle {
++			if detector, supported := state.agentSession.(ExternalSessionUpdateDetector); supported {
++				externallyUpdated, err := detector.ExternallyUpdated()
++				if err != nil {
++					slog.Warn("could not check agent session for external updates",
++						"session_key", sessionKey, "agent_session", currentID, "error", err)
++				} else if externallyUpdated {
++					needRecycle = true
++					recycleReason = "agent transcript changed outside the live process"
++				}
++			}
++		}
+ 		if !needRecycle {
+ 			return state
+ 		}
+@@ -3916,6 +3929,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform,
+ 			"session_key", sessionKey,
+ 			"want_agent_session", wantID,
+ 			"have_agent_session", currentID,
++			"reason", recycleReason,
+ 		)
+ 		e.stopUnsolicitedReader(state)
+ 		state.markStopped()
+diff --git a/core/engine_test.go b/core/engine_test.go
+index 7cd25856..f01ae777 100644
+--- a/core/engine_test.go
++++ b/core/engine_test.go
+@@ -6916,6 +6916,16 @@ func (a *controllableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo,
+ }
+ func (a *controllableAgent) Stop() error { return nil }
+ 
++type externallyUpdatedAgentSession struct {
++	*controllableAgentSession
++	updated bool
++	err     error
++}
++
++func (s *externallyUpdatedAgentSession) ExternallyUpdated() (bool, error) {
++	return s.updated, s.err
++}
++
+ // TestCleanupCAS_SkipsWhenStateReplaced verifies that cleanupInteractiveState
+ // with an expected state pointer is a no-op when the map entry has been replaced.
+ // This is the core of the /new race fix: old goroutine's cleanup must not delete
+@@ -7138,6 +7148,62 @@ func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
+ 	}
+ }
+ 
++// TestExternalSessionUpdate_RecyclesBeforeIncomingMessage locks down the
++// local-first Codex journey: Desktop appends T11 after cc-connect observed T10,
++// then the next platform message must resume the same rollout in a new process.
++func TestExternalSessionUpdate_RecyclesBeforeIncomingMessage(t *testing.T) {
++	threadID := "shared-rollout"
++	newSess := newControllableSession(threadID)
++	var resumedWith string
++	agent := &controllableAgent{startSessionFn: func(_ context.Context, sessionID string) (AgentSession, error) {
++		resumedWith = sessionID
++		return newSess, nil
++	}}
++	p := &stubPlatformEngine{n: "test"}
++	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
++	key := "test:user1"
++	oldBase := newControllableSession(threadID)
++	oldSess := &externallyUpdatedAgentSession{controllableAgentSession: oldBase, updated: true}
++	e.interactiveMu.Lock()
++	e.interactiveStates[key] = &interactiveState{agentSession: oldSess, platform: p, replyCtx: "ctx"}
++	e.interactiveMu.Unlock()
++
++	session := &Session{AgentSessionID: threadID}
++	state := e.getOrCreateInteractiveStateWith(key, p, "ctx", session, e.sessions, nil, "")
++
++	if state.agentSession != newSess {
++		t.Fatal("expected externally stale process to be replaced")
++	}
++	if resumedWith != threadID {
++		t.Fatalf("StartSession called with %q, want shared rollout %q", resumedWith, threadID)
++	}
++	select {
++	case <-oldBase.closed:
++	case <-time.After(2 * time.Second):
++		t.Fatal("externally stale process was not closed before resume")
++	}
++}
++
++func TestExternalSessionUpdateCheckErrorKeepsLiveProcess(t *testing.T) {
++	agent := &controllableAgent{}
++	p := &stubPlatformEngine{n: "test"}
++	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
++	key := "test:user1"
++	base := newControllableSession("shared-rollout")
++	live := &externallyUpdatedAgentSession{controllableAgentSession: base, err: errors.New("rollout temporarily unavailable")}
++	existing := &interactiveState{agentSession: live, platform: p, replyCtx: "ctx"}
++	e.interactiveMu.Lock()
++	e.interactiveStates[key] = existing
++	e.interactiveMu.Unlock()
++
++	state := e.getOrCreateInteractiveStateWith(
++		key, p, "ctx", &Session{AgentSessionID: "shared-rollout"}, e.sessions, nil, "",
++	)
++	if state != existing {
++		t.Fatal("transient fingerprint errors must not drop the incoming message or recycle a healthy process")
++	}
++}
++
+ // TestSessionIDWriteback_ImmediateAfterStartSession verifies that after
+ // StartSession, the agent's CurrentSessionID is immediately written back
+ // to the Session's AgentSessionID when it was previously empty.
+diff --git a/core/interfaces.go b/core/interfaces.go
+index bf592f05..bdeb8273 100644
+--- a/core/interfaces.go
++++ b/core/interfaces.go
+@@ -411,6 +411,15 @@ type AgentSession interface {
+ 	Close() error
+ }
+ 
++// ExternalSessionUpdateDetector is an optional capability for persistent
++// agent sessions whose transcript can also be written by another client.
++// The engine checks it immediately before reusing an idle live process. A true
++// result causes the process to be closed and the same agent session ID to be
++// resumed, so the incoming platform message sees the externally appended turn.
++type ExternalSessionUpdateDetector interface {
++	ExternallyUpdated() (bool, error)
++}
++
+ // PermissionResult represents the user's decision on a permission request.
+ type PermissionResult struct {
+ 	Behavior     string         `json:"behavior"`               // "allow" or "deny"

@@ -35,6 +35,7 @@ cc-connect ↔ 飞书 → delivered + platform message ID
 - 不把飞书凭据复制到自己的配置；直接读取现有 `cc-connect` 项目配置。
 - Codex 原生 permission profile：按 cwd 发现并验证 profile，禁止和 legacy sandbox 同时发送；不可用时失败关闭。
 - Codex App Server 生命周期：飞书入站通过 `thread/resume`、`turn/start` 和实时 `thread/turn/item` 事件工作，不直接追加 rollout JSONL。
+- 飞书每次复用 Codex 进程前检查 rollout offset 与最新 turn ID；发现 Desktop 等其他客户端追加新 turn 时，先关闭旧进程并 resume 同一 rollout，再处理消息。
 - 支持 `stdio` 独立生命周期，以及通过 `codex app-server proxy` 连接持久 daemon 的共享生命周期。
 - `doctor` 校验服务 UID、Unix Socket 类型/owner/mode/group/父目录和 App Server 配置一致性。
 

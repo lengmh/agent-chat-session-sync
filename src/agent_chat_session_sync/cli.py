@@ -77,6 +77,13 @@ def _doctor(settings: Settings) -> int:
     checks.append(("bind-agent extension", attach, "POST /sessions/bind-agent"))
     capabilities = bridge.capabilities() if settings.cc_socket.exists() else set()
     checks.append(("binding routing extension", "binding_routing" in capabilities, "GET /sessions/bind-agent"))
+    checks.append(
+        (
+            "external rollout refresh",
+            "external_session_refresh" in capabilities,
+            "recycle stale Codex process before platform message",
+        )
+    )
     try:
         EventDatabase(settings.database_path)
         database_ok = True
