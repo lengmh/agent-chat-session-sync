@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+import tomllib
 import unittest
 from unittest.mock import patch
 
@@ -42,6 +43,16 @@ class RuntimeReceiptTests(unittest.TestCase):
 
 
 class ProvenanceTests(unittest.TestCase):
+    def test_package_metadata_uses_runtime_version_as_single_source(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        project = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        self.assertNotIn("version", project["project"])
+        self.assertIn("version", project["project"]["dynamic"])
+        self.assertEqual(
+            project["tool"]["setuptools"]["dynamic"]["version"]["attr"],
+            "agent_chat_session_sync.__version__",
+        )
+
     def test_installed_version_mismatch_fails(self) -> None:
         checks = provenance_checks(
             "commit-a",

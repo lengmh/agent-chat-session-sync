@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-chat-session-sync"
-version = "0.4.3"
+dynamic = ["version"]
 description = "Attach local AI-agent sessions to dedicated chat groups through cc-connect"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -30,6 +30,9 @@ agent-chat-session-sync = "agent_chat_session_sync.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "agent_chat_session_sync.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
