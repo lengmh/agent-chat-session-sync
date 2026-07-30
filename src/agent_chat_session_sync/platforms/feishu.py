@@ -95,8 +95,12 @@ class FeishuPlatform:
             return False
         url = f"https://open.feishu.cn/open-apis/im/v1/chats/{urllib.parse.quote(chat_id)}"
         try:
-            self._api_json(url, token=self.token())
-            return True
+            payload = self._api_json(url, token=self.token())
+            # The chat detail endpoint can return code=0 for a dissolved chat.
+            # Mutating that same chat then fails with 232009, so status must be
+            # checked explicitly rather than relying only on the API code.
+            status = str(payload.get("data", {}).get("chat_status", "")).lower()
+            return status != "dissolved"
         except PlatformAPIError as exc:
             if exc.code in STALE_CHAT_CODES:
                 return False

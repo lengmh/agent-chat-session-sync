@@ -18,6 +18,22 @@ class FeishuPlatformTests(unittest.TestCase):
         ):
             self.assertFalse(self.platform.validate_chat("oc-dissolved"))
 
+    def test_validate_chat_checks_successful_response_status(self) -> None:
+        with patch.object(
+            self.platform,
+            "_api_json",
+            return_value={"code": 0, "data": {"chat_status": "dissolved"}},
+        ):
+            self.assertFalse(self.platform.validate_chat("oc-dissolved"))
+
+    def test_validate_chat_accepts_active_chat(self) -> None:
+        with patch.object(
+            self.platform,
+            "_api_json",
+            return_value={"code": 0, "data": {"chat_status": "normal"}},
+        ):
+            self.assertTrue(self.platform.validate_chat("oc-active"))
+
     def test_validate_chat_reraises_unrelated_platform_errors(self) -> None:
         error = PlatformAPIError(999999, "unrelated")
         with patch.object(self.platform, "_api_json", side_effect=error):
