@@ -1,12 +1,94 @@
 # agent-chat-session-sync
 
-把“本地先启动的 Agent 会话”接入 `cc-connect`，并为每个会话创建一个专属飞书群。
+[![CI](https://github.com/Sanshix/agent-chat-session-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Sanshix/agent-chat-session-sync/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/Sanshix/agent-chat-session-sync?include_prereleases)](https://github.com/Sanshix/agent-chat-session-sync/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](pyproject.toml)
+
+把本地已经启动的 Codex / Claude Code 会话接入飞书：每个 Agent 会话自动创建一个专属群，并让飞书回复继续运行同一个本地会话。
+
+> **English summary:** A durable, local-first session orchestration layer for
+> **Codex Desktop / Codex CLI / Claude Code + Feishu (Lark) + cc-connect**.
+> It automatically creates one chat per local Agent session, attaches the chat to
+> an existing Codex rollout or Claude session, and resumes that exact session when
+> a user replies from Feishu.
+
+**发布状态：v0.5.0-alpha.1 · Experimental Alpha · macOS 自动安装 · Python 3.11+ · cc-connect v1.4.1 pinned patch set**
+
+## 你是否需要它
+
+如果你的工作流是下面这样，这个项目就是为你准备的：
+
+```text
+先在 Codex Desktop、Codex CLI 或 Claude Code 本地开始任务
+                         ↓
+自动创建「用户 + Bot」专属飞书群
+                         ↓
+本地 prompt / Assistant 最终回复同步到群
+                         ↓
+从飞书继续同一个 rollout / session，而不是另开会话
+```
+
+| 需求 | 本项目 |
+|---|---|
+| 飞书先发消息，再创建 Agent 会话 | 直接使用 cc-connect 原生能力 |
+| 本地会话先启动，再自动创建飞书群 | 支持 |
+| 一个本地任务一个独立群 | 支持 |
+| 绑定已经存在的 Codex rollout / Claude session | 支持 |
+| Codex Desktop 和飞书轮流更新同一会话 | 支持，发送前检测外部 rollout 更新并 resume |
+| Hook 失败后不丢消息 | 支持，SQLite inbox/outbox + emergency spool |
+| Slack、Telegram 或 Windows 自动安装 | 当前未实现 |
+
+不适合以下场景：只想从飞书发起新会话、希望一个群通过 thread 容纳多个会话，或者不愿维护 patched cc-connect。前两种场景优先直接使用
+[`cc-connect`](https://github.com/chenhg5/cc-connect)。
+
+## 让 AI 帮你判断和安装
+
+把仓库 URL 和下面这段提示交给 Codex、Claude Code 或其他代码 Agent。它会先检查环境，不应直接覆盖你正在运行的服务：
+
+```text
+请审查 agent-chat-session-sync 仓库，并在这台 macOS 机器上安装它。
+目标：把本地 Codex 和 Claude Code 已有会话同步到专属飞书群，飞书回复必须恢复同一个原生 session。
+
+执行前请先：
+1. 检查 Python、Go、Codex、Claude Code、cc-connect、飞书权限和当前后台进程；
+2. 确认 cc-connect 与仓库锁定的 revision/patch 兼容；
+3. 备份现有 cc-connect 二进制与 Hook 配置；
+4. 不输出或提交 app_secret、token、open_id、chat_id、rollout 内容；
+5. 构建 patched cc-connect，运行 Python/Go 测试，再安装 Hook 和 LaunchAgent；
+6. 用 doctor 证明 Socket 权限和运行版本；
+7. 分别执行 Codex、Claude Code 的 acceptance-live，不能用 --skip-reply 代替双向验收。
+
+遇到缺权限、版本不匹配或现有服务来源不明时停止并向我说明，不要猜测部署成功。
+```
+
+AI 搜索或提问时可使用这些自然语言关键词：
+
+- “Codex Desktop session sync to Feishu / Lark”
+- “attach an existing Codex rollout to cc-connect”
+- “one Feishu group per local Codex task”
+- “resume Claude Code session from Feishu”
+- “Codex App Server Feishu bridge”
+- “local-first AI agent chat session orchestration”
+
+## 与 cc-connect 的边界
 
 本项目不是新的消息桥接器。飞书长连接、消息协议、Agent 子进程和会话恢复仍由
 [`cc-connect`](https://github.com/chenhg5/cc-connect) 负责；本项目只提供它缺少的本地会话生命周期编排层。
 
+| cc-connect 负责 | 本项目负责 |
+|---|---|
+| 飞书 WebSocket、Bot 收发、卡片和附件 | 监听本地 Agent Hook 并可靠入队 |
+| 启动/恢复 Codex 与 Claude Code | 解析既有 rollout/session 的稳定身份 |
+| 平台 session 和 Agent session 持久化 | 每个本地会话自动建群、绑定、改名和自愈 |
+| 飞书入站消息路由 | 外部已有 session attach、binding replay、幂等 outbox |
+
+项目不会复制飞书凭据；运行时只读取本机已有的 cc-connect 配置。
+
+## 工作原理
+
 ```text
-本地 Codex Hook
+本地 Codex / Claude Code Hook
       │  只做原始事件持久化（SQLite 失败时 fsync emergency spool）
       ▼
 SQLite inbox → agent-chat-session-sync worker
@@ -17,6 +99,43 @@ SQLite inbox → agent-chat-session-sync worker
       ▼
 cc-connect ↔ 飞书 → delivered + platform message ID
 ```
+
+## 快速开始（macOS）
+
+这不是单独执行一次 `pip install` 就能工作的纯 Python 工具。完整安装包含 Python daemon 和 pinned cc-connect patch 两部分。
+
+```bash
+# 1. 克隆本仓库并进入目录
+
+# 2. 构建经过锁定和测试的 cc-connect
+./scripts/build-cc-connect.sh
+
+# 3. 按下文配置 ~/.cc-connect/config.toml 和 ~/.codex/config.toml
+#    然后显式备份、停止旧 cc-connect，再部署 dist/cc-connect
+
+# 4. 安装 Python worker、Codex/Claude Hooks 和 macOS LaunchAgent
+./scripts/install.sh
+
+# 5. 检查配置、Socket、权限和运行版本
+~/.local/share/agent-chat-session-sync/venv/bin/agent-chat-session-sync doctor
+
+# 6. 做真实双向验收；按提示在两个测试群分别回复 token
+~/.local/share/agent-chat-session-sync/venv/bin/agent-chat-session-sync acceptance-live --agent codex --timeout 900
+~/.local/share/agent-chat-session-sync/venv/bin/agent-chat-session-sync acceptance-live --agent claudecode --timeout 900
+```
+
+`build-cc-connect.sh` 只产生二进制，不会替你覆盖或重启现有服务。这个限制是刻意的：部署路径和服务管理方式必须由本机管理员明确确认。
+
+### 最小飞书权限
+
+飞书应用至少需要满足 cc-connect 原生收发消息的权限，以及本项目的建群、读群能力。完整 acceptance 清理还需要：
+
+- `im:chat:create`
+- `im:chat:read`
+- `im:chat:delete` 或 `im:chat`
+- cc-connect 收发消息所需的消息权限
+
+若不授予删除权限，双向消息仍可工作，但验收程序无法自动解散测试群。
 
 ## 当前能力
 
@@ -39,7 +158,8 @@ cc-connect ↔ 飞书 → delivered + platform message ID
 - 支持 `stdio` 独立生命周期，以及通过 `codex app-server proxy` 连接持久 daemon 的共享生命周期。
 - `doctor` 校验服务 UID、Unix Socket 类型/owner/mode/group/父目录和 App Server 配置一致性。
 
-`0.4.0` 实现 `Codex + 飞书` 与 `Claude Code + 飞书`，并依赖 cc-connect 的 Unix Socket API，因此运行环境是 macOS/Linux。
+`0.5.0-alpha.1` 实现 `Codex + 飞书` 与 `Claude Code + 飞书`，并依赖 cc-connect 的 Unix Socket API。当前自动安装和常驻
+worker 服务只支持 macOS LaunchAgent；Linux 上的核心代码可以手工运行，但在 systemd 安装器完成前不属于正式支持范围。
 同一个飞书 Bot 同时服务 Codex 与 Claude Code 时，两个项目必须启用 `binding_routing = true`；worker 会在 cc-connect
 启动或 Socket 重建后，从 SQLite 重放 binding，使每个动态创建的群只进入所属 Agent engine。
 
@@ -67,7 +187,8 @@ src/agent_chat_session_sync/
 1. Python 3.11 或更高版本。
 2. Codex Desktop/CLI 或 Claude Code 已能产生本地会话文件。
 3. `cc-connect v1.4.1` 已配置对应的 Codex/Claude Code + 飞书项目。
-4. 飞书应用具备建群、读群和发消息权限，`allow_from` 至少包含一个具体 `open_id`，不能只有 `*`。
+4. 飞书应用具备建群、读群和发消息权限；正式 release 验收还需要 `im:chat:delete`（或 `im:chat`）用于自动解散测试群。
+   `allow_from` 至少包含一个具体 `open_id`，不能只有 `*`。
 5. cc-connect 已应用本仓库的 `/sessions/bind-agent` 扩展。
 
 示例 `~/.cc-connect/config.toml`（只展示相关结构）：
@@ -191,7 +312,7 @@ agent-chat-session-sync install-hooks
 agent-chat-session-sync doctor
 ```
 
-普通用户安装可执行：
+macOS 普通用户安装可执行：
 
 ```bash
 ./scripts/install.sh
@@ -212,8 +333,10 @@ agent-chat-session-sync doctor
 | `CC_CONNECT_CONFIG` | `~/.cc-connect/config.toml` |
 | `CC_CONNECT_SOCKET` | `~/.cc-connect/run/api.sock` |
 | `CODEX_HOME` | `~/.codex` |
+| `CLAUDE_HOME` | `~/.claude` |
 
-SQLite 状态库权限会设为 `0600`。`status` 不显示 chat ID 或用户 open ID：
+本机 data directory 权限会设为 `0700`，SQLite、日志、spool 和 worker lock 会设为 `0600`。
+`status` 不显示 chat ID 或用户 open ID：
 
 ```bash
 agent-chat-session-sync status
@@ -235,8 +358,20 @@ agent-chat-session-sync uninstall-hooks
 ./scripts/build-cc-connect.sh
 ```
 
-脚本会克隆固定 revision、先执行 `git apply --check`、运行 `go test ./core ./agent/codex`，然后以
+脚本会克隆固定 revision、先执行 `git apply --check`、运行 core、Codex、Claude Code 和飞书 Go 测试，然后以
 `no_web goolm` tags 构建到 `dist/cc-connect`。它不会自动覆盖正在运行的 cc-connect；请先停止服务，备份原二进制，再显式部署构建产物。
+
+正式 release 必须从 clean worktree 构建并附带校验和：
+
+```bash
+python3 -m pip install build
+./scripts/build-release.sh
+shasum -a 256 -c dist/SHA256SUMS
+```
+
+release 包会验证 wheel 不含构建机绝对路径，并验证 sdist 包含 `patches/`、`scripts/` 和 `docs/`。
+GitHub Release 还提供经过同一 patch/test gate 构建的 macOS arm64 `cc-connect` 二进制；下载后应先用
+`SHA256SUMS` 校验，并显式 `chmod +x`。其他平台请从源码构建，不要使用架构不匹配的二进制。
 
 扩展接口为本机 mode-0600 Unix Socket 上的：
 
@@ -286,7 +421,8 @@ Hook 遇到错误始终返回成功，避免阻断 Codex 回合；每次收件�
 
 ```bash
 ./scripts/install.sh
-agent-chat-session-sync acceptance-live --timeout 300
+agent-chat-session-sync acceptance-live --agent codex --timeout 900
+agent-chat-session-sync acceptance-live --agent claudecode --timeout 900
 ```
 
 `acceptance-live` 默认要求在测试群发送指定 reply token，以证明飞书入站恢复了同一 rollout。

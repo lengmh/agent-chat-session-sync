@@ -263,16 +263,18 @@ index eef856a8..f2f5d5ba 100644
  	s := &appServerSession{}
  	effort := "xhigh"
 diff --git a/core/api.go b/core/api.go
-index cf345cc3..0a10c7b0 100644
+index 621d3495..12cbc53a 100644
 --- a/core/api.go
 +++ b/core/api.go
-@@ -326,5 +326,5 @@ type BindAgentSessionRequest struct {
+@@ -325,7 +325,7 @@ type BindAgentSessionRequest struct {
+ 
  func (s *APIServer) handleBindAgentSession(w http.ResponseWriter, r *http.Request) {
  	if r.Method == http.MethodGet {
 -		apiJSON(w, http.StatusOK, map[string]any{"capabilities": []string{"attach_agent_session", "binding_routing"}})
 +		apiJSON(w, http.StatusOK, map[string]any{"capabilities": []string{"attach_agent_session", "binding_routing", "external_session_refresh"}})
  		return
  	}
+ 	if r.Method != http.MethodPost {
 diff --git a/core/api_test.go b/core/api_test.go
 index b7186157..31ad6fd9 100644
 --- a/core/api_test.go
@@ -309,14 +311,108 @@ index b7186157..31ad6fd9 100644
  	stubPlatformEngine
  	keys []string
 diff --git a/core/engine.go b/core/engine.go
-index 5f4b2a31..fd35c016 100644
+index 5f4b2a31..33f9afd8 100644
 --- a/core/engine.go
 +++ b/core/engine.go
-@@ -3908,6 +3908,19 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform,
+@@ -504,6 +504,7 @@ type interactiveState struct {
+ 	recallProbeInFlight      bool
+ 	workspaceDir             string
+ 	agent                    Agent
++	ccSessionKey             string
+ 	mu                       sync.Mutex
+ 	stopCh                   chan struct{}
+ 	stopped                  bool
+@@ -3725,6 +3726,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
+ 	}()
+ 
+ 	e.processInteractiveEvents(state, session, sessions, interactiveKey, msg.MessageID, turnStart, stopTyping, sendDone, msg.ReplyCtx)
++	state = e.currentInteractiveState(interactiveKey, state)
+ 	if elapsed := time.Since(sendStart); elapsed >= slowAgentSend {
+ 		slog.Warn("slow agent send", "elapsed", elapsed, "session", msg.SessionKey, "content_len", len(msg.Content))
+ 	}
+@@ -3888,13 +3890,70 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
+ 	existing.mu.Unlock()
+ }
+ 
++func (e *Engine) currentInteractiveState(sessionKey string, fallback *interactiveState) *interactiveState {
++	e.interactiveMu.Lock()
++	defer e.interactiveMu.Unlock()
++	if current := e.interactiveStates[sessionKey]; current != nil {
++		return current
++	}
++	return fallback
++}
++
++// refreshInteractiveStateBeforeQueuedSend applies the same external-rollout
++// check used for a newly arriving message immediately before a queued message
++// is sent. A Desktop turn can land while the platform message is waiting behind
++// an active turn, so checking only at queue insertion is not sufficient.
++func (e *Engine) refreshInteractiveStateBeforeQueuedSend(
++	state *interactiveState,
++	session *Session,
++	sessions *SessionManager,
++	sessionKey string,
++) *interactiveState {
++	state.mu.Lock()
++	currentAgentSession := state.agentSession
++	p := state.platform
++	replyCtx := state.replyCtx
++	agent := state.agent
++	workspaceDir := state.workspaceDir
++	ccSessionKey := state.ccSessionKey
++	state.mu.Unlock()
++	detector, supported := currentAgentSession.(ExternalSessionUpdateDetector)
++	if !supported {
++		return state
++	}
++	externallyUpdated, err := detector.ExternallyUpdated()
++	if err != nil {
++		slog.Warn("could not check queued agent session for external updates",
++			"session_key", sessionKey, "error", err)
++		return state
++	}
++	if !externallyUpdated {
++		return state
++	}
++
++	var agentOverride Agent
++	if agent != nil && agent != e.agent {
++		agentOverride = agent
++	}
++	refreshed := e.getOrCreateInteractiveStateWith(
++		sessionKey, p, replyCtx, session, sessions, agentOverride, ccSessionKey, true,
++	)
++	if workspaceDir != "" {
++		refreshed.mu.Lock()
++		refreshed.workspaceDir = workspaceDir
++		refreshed.mu.Unlock()
++	}
++	return refreshed
++}
++
+ // When agentOverride is non-nil it is used instead of e.agent to start the session.
+ // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
+-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
++func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, forceRecycle ...bool) *interactiveState {
+ 	e.interactiveMu.Lock()
+ 	defer e.interactiveMu.Unlock()
+ 
+ 	state, ok := e.interactiveStates[sessionKey]
++	replacementSource := state
+ 	if ok && state.agentSession != nil && state.agentSession.Alive() {
+ 		// Verify the running agent session matches the current active session.
+ 		// After /new or /switch the active session changes, but the old agent
+@@ -3907,7 +3966,24 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform,
+ 		// - the process has not reported an ID yet (startup; empty want is OK).
  		// If wantID is empty (/new, cleared session) but the process already has
  		// a concrete ID, reusing would keep --resume context — recycle (#238).
- 		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
-+		recycleReason := "agent session mismatch"
+-		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
++		needRecycle := len(forceRecycle) > 0 && forceRecycle[0]
++		recycleReason := "external update detected before queued send"
++		if !needRecycle {
++			needRecycle = currentID != "" && (wantID == "" || wantID != currentID)
++			recycleReason = "agent session mismatch"
++		}
 +		if !needRecycle {
 +			if detector, supported := state.agentSession.(ExternalSessionUpdateDetector); supported {
 +				externallyUpdated, err := detector.ExternallyUpdated()
@@ -332,7 +428,7 @@ index 5f4b2a31..fd35c016 100644
  		if !needRecycle {
  			return state
  		}
-@@ -3916,6 +3929,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform,
+@@ -3916,6 +3992,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform,
  			"session_key", sessionKey,
  			"want_agent_session", wantID,
  			"have_agent_session", currentID,
@@ -340,11 +436,98 @@ index 5f4b2a31..fd35c016 100644
  		)
  		e.stopUnsolicitedReader(state)
  		state.markStopped()
+@@ -3971,8 +4048,8 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform,
+ 	// Check if context is already canceled (e.g. during shutdown/restart)
+ 	if e.ctx.Err() != nil {
+ 		slog.Debug("skipping session start: context canceled", "session_key", sessionKey)
+-		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
+-		adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
++		newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, ccSessionKey: ccSessionKey, eventsNeedResync: true}
++		adoptPendingFromPlaceholder(replacementSource, newState)
+ 		state = newState
+ 		e.interactiveStates[sessionKey] = state
+ 		return state
+@@ -4035,8 +4112,8 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform,
+ 				Platform:   p.Name(),
+ 				Error:      fmt.Sprintf("failed to start session: %v", err),
+ 			})
+-			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, eventsNeedResync: true}
+-			adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
++			newState := &interactiveState{platform: p, replyCtx: replyCtx, agent: agent, ccSessionKey: ccSessionKey, eventsNeedResync: true}
++			adoptPendingFromPlaceholder(replacementSource, newState)
+ 			state = newState
+ 			e.interactiveStates[sessionKey] = state
+ 			return state
+@@ -4077,9 +4154,10 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform,
+ 		platform:         p,
+ 		replyCtx:         replyCtx,
+ 		agent:            agent,
++		ccSessionKey:     ccSessionKey,
+ 		eventsNeedResync: true,
+ 	}
+-	adoptPendingFromPlaceholder(e.interactiveStates[sessionKey], newState)
++	adoptPendingFromPlaceholder(replacementSource, newState)
+ 	state = newState
+ 	e.interactiveStates[sessionKey] = state
+ 
+@@ -5604,6 +5682,12 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
+ 			// Check for queued messages — if present, continue the event loop
+ 			// for the next turn instead of returning.
+ 			state.mu.Lock()
++			hasPendingMessages := len(state.pendingMessages) > 0
++			state.mu.Unlock()
++			if hasPendingMessages {
++				state = e.refreshInteractiveStateBeforeQueuedSend(state, session, sessions, sessionKey)
++			}
++			state.mu.Lock()
+ 			droppedStale := 0
+ 			for len(state.pendingMessages) > 0 && e.isQueuedUserMessageStaleForDrainLocked(state, state.pendingMessages[0].userMessageTimeMs) {
+ 				state.pendingMessages = state.pendingMessages[1:]
+@@ -5936,6 +6020,7 @@ func (e *Engine) notifyDroppedQueuedMessages(state *interactiveState, reason err
+ // Returns true if the session was unlocked by this call.
+ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string) bool {
+ 	for {
++		state = e.currentInteractiveState(sessionKey, state)
+ 		state.mu.Lock()
+ 		if len(state.pendingMessages) == 0 {
+ 			session.Unlock()
+@@ -5958,6 +6043,16 @@ func (e *Engine) drainPendingMessages(state *interactiveState, session *Session,
+ 			state.mu.Unlock()
+ 			return true
+ 		}
++		state.mu.Unlock()
++		state = e.refreshInteractiveStateBeforeQueuedSend(state, session, sessions, sessionKey)
++		state.mu.Lock()
++		// A replacement state adopts the pending queue. Recheck because a
++		// concurrent command may have cleared it while the old process closed.
++		if len(state.pendingMessages) == 0 {
++			session.Unlock()
++			state.mu.Unlock()
++			return true
++		}
+ 		queued := state.pendingMessages[0]
+ 		state.pendingMessages = state.pendingMessages[1:]
+ 		state.platform = queued.platform
 diff --git a/core/engine_test.go b/core/engine_test.go
-index 7cd25856..f01ae777 100644
+index 7cd25856..09e9ee5b 100644
 --- a/core/engine_test.go
 +++ b/core/engine_test.go
-@@ -6916,6 +6916,16 @@ func (a *controllableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo,
+@@ -1100,10 +1100,10 @@ func TestProcessInteractiveEvents_NonTerminalResultContinuesTurn(t *testing.T) {
+ 	session := e.sessions.GetOrCreateActive(sessionKey)
+ 	agentSession := newControllableSession("s1")
+ 	state := &interactiveState{
+-		agentSession:                  agentSession,
+-		platform:                      p,
+-		replyCtx:                      "ctx-1",
+-		currentTurnUserMessageTimeMs:  100,
++		agentSession:                   agentSession,
++		platform:                       p,
++		replyCtx:                       "ctx-1",
++		currentTurnUserMessageTimeMs:   100,
+ 		lastCompletedUserMessageTimeMs: 0,
+ 	}
+ 	e.interactiveStates[sessionKey] = state
+@@ -6916,6 +6916,18 @@ func (a *controllableAgent) ListSessions(_ context.Context) ([]AgentSessionInfo,
  }
  func (a *controllableAgent) Stop() error { return nil }
  
@@ -352,16 +535,18 @@ index 7cd25856..f01ae777 100644
 +	*controllableAgentSession
 +	updated bool
 +	err     error
++	checks  int
 +}
 +
 +func (s *externallyUpdatedAgentSession) ExternallyUpdated() (bool, error) {
++	s.checks++
 +	return s.updated, s.err
 +}
 +
  // TestCleanupCAS_SkipsWhenStateReplaced verifies that cleanupInteractiveState
  // with an expected state pointer is a no-op when the map entry has been replaced.
  // This is the core of the /new race fix: old goroutine's cleanup must not delete
-@@ -7138,6 +7148,62 @@ func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
+@@ -7138,6 +7150,117 @@ func TestSessionMismatch_ReusesWhenIDsMatch(t *testing.T) {
  	}
  }
  
@@ -421,9 +606,84 @@ index 7cd25856..f01ae777 100644
 +	}
 +}
 +
++// TestExternalSessionUpdate_RecyclesAgainBeforeQueuedSend covers the window in
++// which Desktop appends a turn after a platform message was queued behind an
++// active cc-connect turn. The pending message must move to a resumed process;
++// it must never be sent through the stale process that accepted the first turn.
++func TestExternalSessionUpdate_RecyclesAgainBeforeQueuedSend(t *testing.T) {
++	threadID := "shared-rollout"
++	newSess := newControllableSession(threadID)
++	var resumedWith string
++	agent := &controllableAgent{startSessionFn: func(_ context.Context, sessionID string) (AgentSession, error) {
++		resumedWith = sessionID
++		return newSess, nil
++	}}
++	p := &stubPlatformEngine{n: "test"}
++	e := NewEngine("test", agent, []Platform{p}, "", LangEnglish)
++	key := "test:user1"
++	oldBase := newControllableSession(threadID)
++	oldSess := &externallyUpdatedAgentSession{controllableAgentSession: oldBase, updated: true}
++	queued := queuedMessage{content: "queued after Desktop turn", platform: p, replyCtx: "queued-ctx"}
++	oldState := &interactiveState{
++		agentSession:    oldSess,
++		platform:        p,
++		replyCtx:        "ctx",
++		agent:           agent,
++		pendingMessages: []queuedMessage{queued},
++	}
++	e.interactiveMu.Lock()
++	e.interactiveStates[key] = oldState
++	e.interactiveMu.Unlock()
++
++	state := e.refreshInteractiveStateBeforeQueuedSend(
++		oldState, &Session{AgentSessionID: threadID}, e.sessions, key,
++	)
++
++	if oldSess.checks != 1 {
++		t.Fatalf("external update checks = %d, want 1 immediately before queued send", oldSess.checks)
++	}
++	if state == oldState || state.agentSession != newSess {
++		t.Fatal("expected queued message to use a newly resumed agent process")
++	}
++	if resumedWith != threadID {
++		t.Fatalf("StartSession called with %q, want %q", resumedWith, threadID)
++	}
++	if len(state.pendingMessages) != 1 || state.pendingMessages[0].content != queued.content {
++		t.Fatal("queued message was not adopted by the replacement state")
++	}
++	if len(oldState.pendingMessages) != 0 {
++		t.Fatal("queued message remained attached to the stale state")
++	}
++	select {
++	case <-oldBase.closed:
++	case <-time.After(2 * time.Second):
++		t.Fatal("stale process was not closed before queued send")
++	}
++}
++
  // TestSessionIDWriteback_ImmediateAfterStartSession verifies that after
  // StartSession, the agent's CurrentSessionID is immediately written back
  // to the Session's AgentSessionID when it was previously empty.
+@@ -15016,8 +15139,8 @@ func TestIsAllowResponse_WithMultipleMentions(t *testing.T) {
+ func TestIsAllowResponse_NotInsideOtherWord(t *testing.T) {
+ 	cases := []string{
+ 		"禁止允许这种",
+-		"不允许这样",   // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
+-		"我不太允许这件事", // long sentence, no token equals "允许"
++		"不允许这样",                            // "不允许" has its own deny entry, but as part of "不允许这样" the user clearly is denying / negating, never allowing.
++		"我不太允许这件事",                         // long sentence, no token equals "允许"
+ 		"please don't allowall the things", // FieldsFunc keeps "allowall" intact, but it is the approveAll single-token form, not allow.
+ 		"hello world",
+ 		"",
+@@ -15045,7 +15168,7 @@ func TestIsDenyResponse_WithMention(t *testing.T) {
+ 	}
+ 
+ 	negatives := []string{
+-		"拒绝症患者",       // embedded — must not match
++		"拒绝症患者",        // embedded — must not match
+ 		"我们都不应该 hello", // unrelated
+ 	}
+ 	for _, s := range negatives {
 diff --git a/core/interfaces.go b/core/interfaces.go
 index bf592f05..bdeb8273 100644
 --- a/core/interfaces.go

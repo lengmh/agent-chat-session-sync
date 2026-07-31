@@ -50,6 +50,7 @@ class BindingStore:
 
     def save(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.chmod(0o700)
         fd, tmp_name = tempfile.mkstemp(prefix=self.path.name + ".", dir=self.path.parent)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:

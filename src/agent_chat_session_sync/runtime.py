@@ -15,7 +15,9 @@ from .queue import EventDatabase, canonical_json
 def make_logger(path: Path):
     def log(message: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
+        path.parent.chmod(0o700)
         with path.open("a", encoding="utf-8") as handle:
+            path.chmod(0o600)
             handle.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {message}\n")
 
     return log
@@ -31,6 +33,7 @@ def process_agent_hook(
     environment = dict(os.environ) if environment is None else environment
     logger = make_logger(settings.log_path)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    settings.data_dir.chmod(0o700)
     provenance = current_provenance()
     identity = (
         f"service_version={provenance.service_version} git_commit={provenance.git_commit} "

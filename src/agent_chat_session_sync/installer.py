@@ -116,7 +116,10 @@ def install_claude_hooks(path: Path | None = None, command: str | None = None) -
 
 
 def _uninstall_hooks(path: Path) -> Path:
-    document = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return path
     hooks = document.get("hooks", {})
     for event in EVENTS:
         entries = [entry for entry in hooks.get(event, []) if not _ours(entry)]
@@ -152,14 +155,18 @@ def install_worker_service(data_dir: Path, executable: str | None = None) -> Pat
     path = worker_plist_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.chmod(0o700)
+    worker_log = data_dir / "worker.log"
+    worker_log.touch(exist_ok=True)
+    worker_log.chmod(0o600)
     document = {
         "Label": WORKER_LABEL,
         "ProgramArguments": [str(Path(executable).resolve()), "worker"],
         "RunAtLoad": True,
         "KeepAlive": True,
         "ProcessType": "Background",
-        "StandardOutPath": str(data_dir / "worker.log"),
-        "StandardErrorPath": str(data_dir / "worker.log"),
+        "StandardOutPath": str(worker_log),
+        "StandardErrorPath": str(worker_log),
         "EnvironmentVariables": {
             "ACSS_DATA_DIR": str(data_dir),
             "CODEX_HOME": os.environ.get("CODEX_HOME", str(Path.home() / ".codex")),

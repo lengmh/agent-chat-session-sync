@@ -24,8 +24,9 @@ class build_py(_build_py):
     def run(self) -> None:
         super().run()
         target = Path(self.build_lib) / "agent_chat_session_sync" / "_build_info.py"
+        commit = source_commit()
         target.write_text(
-            f'GIT_COMMIT = {source_commit()!r}\nBUILD_SOURCE = {str(Path(__file__).parent.resolve())!r}\n',
+            f'GIT_COMMIT = {commit!r}\nBUILD_SOURCE = {("git:" + commit)!r}\n',
             encoding="utf-8",
         )
 

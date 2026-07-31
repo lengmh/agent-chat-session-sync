@@ -42,6 +42,12 @@ class InstallerTests(unittest.TestCase):
             document = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(document["hooks"], {})
 
+    def test_uninstall_is_idempotent_when_hook_file_is_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "missing-hooks.json"
+            self.assertEqual(uninstall_codex_hooks(path), path)
+            self.assertFalse(path.exists())
+
     def test_claude_install_preserves_settings_and_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "settings.json"

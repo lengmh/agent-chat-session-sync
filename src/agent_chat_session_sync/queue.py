@@ -85,6 +85,7 @@ class EventDatabase:
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.parent.chmod(0o700)
         self._initialize()
 
     @contextmanager

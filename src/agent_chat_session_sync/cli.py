@@ -22,6 +22,7 @@ from .installer import (
     uninstall_claude_hooks,
     uninstall_worker_service,
 )
+from .locking import LockUnavailableError, exclusive_file_lock
 from .models import Binding
 from .permissions import codex_permission_config_checks, socket_security_checks
 from .runtime import hook_main, make_logger
@@ -371,11 +372,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     settings = Settings.from_env()
     if args.command == "worker":
-        worker = EventWorker(settings, make_logger(settings.worker_log_path))
-        if args.once:
-            return 0 if worker.run_once() else 3
-        worker.run_forever(args.poll_interval)
-        return 0
+        try:
+            with exclusive_file_lock(settings.lock_path, blocking=False):
+                worker = EventWorker(settings, make_logger(settings.worker_log_path))
+                if args.once:
+                    return 0 if worker.run_once() else 3
+                worker.run_forever(args.poll_interval)
+                return 0
+        except LockUnavailableError as exc:
+            print(f"worker not started: {exc}", file=sys.stderr)
+            return 4
     if args.command == "install-service":
         print(f"installed worker: {install_worker_service(settings.data_dir)}")
         return 0

@@ -1,6 +1,11 @@
 #!/bin/sh
 set -eu
 
+if [ "$(uname -s)" != "Darwin" ]; then
+  printf '%s\n' "automatic service installation currently supports macOS only" >&2
+  exit 1
+fi
+
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 VENV=${ACSS_VENV:-"$HOME/.local/share/agent-chat-session-sync/venv"}
 
