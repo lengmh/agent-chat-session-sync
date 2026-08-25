@@ -9,6 +9,8 @@ import sqlite3
 import time
 from typing import Any, Iterator
 
+from .security import ensure_private_directory, harden_private_file
+
 from .models import Binding
 
 
@@ -84,8 +86,7 @@ class EventDatabase:
 
     def __init__(self, path: Path):
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.parent.chmod(0o700)
+        ensure_private_directory(self.path.parent)
         self._initialize()
 
     @contextmanager
@@ -168,7 +169,7 @@ class EventDatabase:
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (str(self.SCHEMA_VERSION),),
             )
-        self.path.chmod(0o600)
+        harden_private_file(self.path)
 
     def enqueue(
         self,

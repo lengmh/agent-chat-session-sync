@@ -9,6 +9,8 @@ import tempfile
 import tomllib
 from typing import Any
 
+from .security import preserve_file_mode
+
 
 FEISHU_OPTIONS_RE = re.compile(
     r"(?P<head>^\[\[projects\.platforms\]\]\s*$.*?^\s*type\s*=\s*[\"']feishu[\"']\s*$.*?"
@@ -52,7 +54,7 @@ def _atomic_replace(path: Path, updated: str, backup_suffix: str) -> Path:
             handle.write(updated)
             handle.flush()
             os.fsync(handle.fileno())
-        os.chmod(tmp_name, path.stat().st_mode & 0o777)
+        preserve_file_mode(path, Path(tmp_name))
         os.replace(tmp_name, path)
     finally:
         try:

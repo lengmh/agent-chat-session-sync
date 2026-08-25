@@ -61,11 +61,12 @@ def make_settings(root: Path) -> tuple[Settings, Path]:
     work = root / "work"
     work.mkdir()
     config = root / "config.toml"
+    encoded_root = json.dumps(str(root))
     config.write_text(
         f'''[[projects]]
 name = "project"
 mode = "multi-workspace"
-base_dir = "{root}"
+base_dir = {encoded_root}
 workspace_init_allow_local_paths = true
 [projects.agent]
 type = "codex"
@@ -93,12 +94,13 @@ class WorkerTests(unittest.TestCase):
 
     @staticmethod
     def enable_claude_project(settings: Settings, root: Path) -> None:
+        encoded_root = json.dumps(str(root))
         with settings.cc_config.open("a", encoding="utf-8") as handle:
             handle.write(
                 f'''\n[[projects]]
 name = "claude-project"
 mode = "multi-workspace"
-base_dir = "{root}"
+base_dir = {encoded_root}
 [projects.agent]
 type = "claudecode"
 [[projects.platforms]]

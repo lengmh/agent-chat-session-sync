@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 import tempfile
 import tomllib
@@ -29,9 +30,10 @@ class RuntimeReceiptTests(unittest.TestCase):
             log = settings.log_path.read_text(encoding="utf-8")
             for key in ("service_version=", "git_commit=", "package_path=", "python_path=", "config_path="):
                 self.assertIn(key, log)
-            self.assertEqual(settings.data_dir.stat().st_mode & 0o777, 0o700)
-            self.assertEqual(settings.log_path.stat().st_mode & 0o777, 0o600)
-            self.assertEqual(settings.database_path.stat().st_mode & 0o777, 0o600)
+            if os.name != "nt":
+                self.assertEqual(settings.data_dir.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(settings.log_path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(settings.database_path.stat().st_mode & 0o777, 0o600)
 
     def test_sqlite_failure_uses_fsynced_emergency_spool(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

@@ -1,5 +1,7 @@
 import json
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -7,6 +9,7 @@ from unittest import mock
 
 from agent_chat_session_sync.installer import (
     installed_executable,
+    hook_command,
     install_claude_hooks,
     install_codex_hooks,
     uninstall_codex_hooks,
@@ -62,11 +65,39 @@ class InstallerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             bin_dir = Path(directory) / "bin"
             bin_dir.mkdir()
-            python = bin_dir / "python"
-            command = bin_dir / "agent-chat-session-sync"
-            python.symlink_to(Path(sys.executable))
+            python = bin_dir / ("python.exe" if os.name == "nt" else "python")
+            command = bin_dir / ("agent-chat-session-sync.exe" if os.name == "nt" else "agent-chat-session-sync")
             command.touch(mode=0o755)
             with mock.patch("agent_chat_session_sync.installer.sys.executable", str(python)), mock.patch(
                 "agent_chat_session_sync.installer.shutil.which", return_value=None
             ):
                 self.assertEqual(installed_executable(), str(command.resolve()))
+
+    @unittest.skipUnless(os.name == "nt", "Windows console-script quoting contract")
+    def test_generated_hook_command_executes_from_a_path_with_spaces(self) -> None:
+        executable = installed_executable()
+        self.assertIsNotNone(executable)
+        self.assertIn(" ", str(executable), "test environment must exercise a spaced executable path")
+        with tempfile.TemporaryDirectory() as directory:
+            environment = dict(os.environ)
+            environment["ACSS_DATA_DIR"] = directory
+            receipt = subprocess.run(
+                hook_command("codex"),
+                input=json.dumps({"hook_event_name": "Stop", "session_id": "windows-hook"}),
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+            status = subprocess.run(
+                [str(executable), "events", "--limit", "1"],
+                text=True,
+                capture_output=True,
+                env=environment,
+                check=False,
+            )
+
+        self.assertEqual(receipt.returncode, 0, receipt.stderr)
+        self.assertEqual(receipt.stdout.strip(), "{}")
+        self.assertEqual(status.returncode, 0, status.stderr)
+        self.assertIn("received", status.stdout)

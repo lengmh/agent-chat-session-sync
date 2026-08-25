@@ -58,6 +58,7 @@ class PermissionConfigTests(unittest.TestCase):
         self.assertFalse(next(check.okay for check in checks if check.name == "bad stdio transport"))
 
 
+@unittest.skipUnless(hasattr(socket, "AF_UNIX"), "Unix socket security contract")
 class SocketSecurityTests(unittest.TestCase):
     def test_owner_only_socket_passes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

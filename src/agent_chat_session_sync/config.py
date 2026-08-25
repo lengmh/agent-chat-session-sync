@@ -6,6 +6,7 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
+from .endpoints import LocalEndpoint
 from .models import Project
 
 
@@ -16,6 +17,13 @@ class Settings:
     cc_socket: Path
     codex_home: Path
     claude_home: Path = field(default_factory=lambda: Path.home() / ".claude")
+    cc_endpoint: LocalEndpoint | None = None
+
+    @property
+    def local_endpoint(self) -> LocalEndpoint:
+        if self.cc_endpoint is not None:
+            return self.cc_endpoint
+        return LocalEndpoint("unix", str(self.cc_socket))
 
     @property
     def codex_app_server_socket(self) -> Path:
@@ -29,13 +37,20 @@ class Settings:
     @classmethod
     def from_env(cls) -> "Settings":
         home = Path.home()
-        data_dir = Path(os.environ.get("ACSS_DATA_DIR", home / ".local/share/agent-chat-session-sync"))
+        if os.name == "nt":
+            local_app_data = Path(os.environ.get("LOCALAPPDATA", home / "AppData/Local"))
+            default_data_dir = local_app_data / "agent-chat-session-sync"
+        else:
+            default_data_dir = home / ".local/share/agent-chat-session-sync"
+        data_dir = Path(os.environ.get("ACSS_DATA_DIR", default_data_dir))
+        endpoint_value = os.environ.get("CC_CONNECT_ENDPOINT")
         return cls(
             data_dir=data_dir.expanduser(),
             cc_config=Path(os.environ.get("CC_CONNECT_CONFIG", home / ".cc-connect/config.toml")).expanduser(),
             cc_socket=Path(os.environ.get("CC_CONNECT_SOCKET", home / ".cc-connect/run/api.sock")).expanduser(),
             codex_home=Path(os.environ.get("CODEX_HOME", home / ".codex")).expanduser(),
             claude_home=Path(os.environ.get("CLAUDE_HOME", home / ".claude")).expanduser(),
+            cc_endpoint=LocalEndpoint.parse(endpoint_value) if endpoint_value else None,
         )
 
     @property

@@ -7,6 +7,7 @@ import tempfile
 from typing import Any
 
 from .models import Binding
+from .security import ensure_private_directory, harden_private_file
 
 
 class BindingStore:
@@ -49,14 +50,13 @@ class BindingStore:
         return True
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.parent.chmod(0o700)
+        ensure_private_directory(self.path.parent)
         fd, tmp_name = tempfile.mkstemp(prefix=self.path.name + ".", dir=self.path.parent)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(self.state, handle, ensure_ascii=False, indent=2)
                 handle.write("\n")
-            os.chmod(tmp_name, 0o600)
+            harden_private_file(Path(tmp_name))
             os.replace(tmp_name, self.path)
         finally:
             try:

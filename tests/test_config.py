@@ -1,11 +1,36 @@
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
-from agent_chat_session_sync.config import matching_project
+from agent_chat_session_sync.config import Settings, matching_project
 
 
 class ConfigTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows default data directory")
+    def test_windows_default_data_dir_uses_local_app_data(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch.dict(
+            os.environ, {"LOCALAPPDATA": directory}, clear=False
+        ):
+            os.environ.pop("ACSS_DATA_DIR", None)
+            settings = Settings.from_env()
+
+        self.assertEqual(settings.data_dir, Path(directory) / "agent-chat-session-sync")
+
+    def test_local_endpoint_environment_takes_precedence_over_legacy_socket(self) -> None:
+        with mock.patch.dict(
+            os.environ,
+            {
+                "CC_CONNECT_ENDPOINT": "npipe://./pipe/cc-connect-api-user",
+                "CC_CONNECT_SOCKET": "/tmp/legacy.sock",
+            },
+            clear=False,
+        ):
+            settings = Settings.from_env()
+
+        self.assertEqual(str(settings.local_endpoint), "npipe://./pipe/cc-connect-api-user")
+
     def test_matching_project_uses_most_specific_workdir(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             tmp_path = Path(directory)

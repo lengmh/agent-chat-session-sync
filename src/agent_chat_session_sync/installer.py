@@ -11,6 +11,8 @@ import plistlib
 import subprocess
 from typing import Any
 
+from .security import ensure_private_directory, harden_private_file
+
 
 DESCRIPTION = "Mirror local Codex and Claude Code sessions to dedicated cc-connect chat groups."
 EVENTS: dict[str, dict[str, Any]] = {
@@ -27,7 +29,8 @@ def default_hooks_path() -> Path:
 def installed_executable() -> str | None:
     # Keep the venv path itself: its Python is commonly a symlink to a global
     # interpreter, while the console-script entry point lives beside the link.
-    adjacent = Path(sys.executable).parent / "agent-chat-session-sync"
+    command_name = "agent-chat-session-sync.exe" if os.name == "nt" else "agent-chat-session-sync"
+    adjacent = Path(sys.executable).parent / command_name
     if adjacent.is_file() and os.access(adjacent, os.X_OK):
         return str(adjacent.resolve())
     return shutil.which("agent-chat-session-sync")
@@ -154,11 +157,10 @@ def install_worker_service(data_dir: Path, executable: str | None = None) -> Pat
         raise RuntimeError("agent-chat-session-sync executable not found")
     path = worker_plist_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    data_dir.mkdir(parents=True, exist_ok=True)
-    data_dir.chmod(0o700)
+    ensure_private_directory(data_dir)
     worker_log = data_dir / "worker.log"
     worker_log.touch(exist_ok=True)
-    worker_log.chmod(0o600)
+    harden_private_file(worker_log)
     document = {
         "Label": WORKER_LABEL,
         "ProgramArguments": [str(Path(executable).resolve()), "worker"],

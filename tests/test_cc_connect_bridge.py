@@ -9,6 +9,7 @@ from agent_chat_session_sync.bridges.cc_connect import CCConnectBridge
 
 
 class CCConnectBridgeTests(unittest.TestCase):
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "Unix socket transport contract")
     def test_unicode_session_name_is_sent_as_utf8(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             path = Path(raw) / "api.sock"

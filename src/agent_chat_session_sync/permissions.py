@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import grp
 import os
 from pathlib import Path
 import stat
@@ -23,6 +22,15 @@ def socket_security_checks(name: str, path: Path, expected_uid: int | None = Non
     or world-writable parent directory fails closed.
     """
 
+    if os.name == "nt":
+        return [
+            SecurityCheck(
+                f"{name} ACL",
+                False,
+                f"{path}: Windows ACL verification is not available",
+            )
+        ]
+
     uid = os.getuid() if expected_uid is None else expected_uid
     try:
         info = path.stat()
@@ -41,6 +49,8 @@ def socket_security_checks(name: str, path: Path, expected_uid: int | None = Non
         ),
     ]
     if mode & 0o060:
+        import grp
+
         try:
             group_name = grp.getgrgid(info.st_gid).gr_name
         except KeyError:
