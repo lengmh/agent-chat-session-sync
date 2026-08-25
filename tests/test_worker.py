@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import json
+import http.client
 from pathlib import Path
 import tempfile
 import time
 import unittest
 
 from agent_chat_session_sync.config import Settings
+from agent_chat_session_sync.bridges.cc_connect import BridgeInfo
+from agent_chat_session_sync.endpoints import LocalEndpoint
 from agent_chat_session_sync.platforms.feishu import FeishuPlatform
+from agent_chat_session_sync.permissions import SecurityCheck
 from agent_chat_session_sync.queue import EventDatabase
 from agent_chat_session_sync.worker import EventWorker
 
@@ -15,9 +19,36 @@ from tests.test_resolver import write_rollout
 
 
 class FakeBridge:
-    def __init__(self, failures: int = 0):
+    def __init__(
+        self,
+        failures: int = 0,
+        instance_id: str = "instance-1",
+        inspect_failures: int = 0,
+        inspect_error: Exception | None = None,
+    ):
         self.failures = failures
+        self.instance_id = instance_id
+        self.inspect_failures = inspect_failures
+        self.inspect_error = inspect_error
         self.attached = []
+
+    def inspect(self):
+        if self.inspect_error is not None:
+            raise self.inspect_error
+        if self.inspect_failures:
+            self.inspect_failures -= 1
+            raise ConnectionRefusedError("cc-connect endpoint unavailable")
+        return BridgeInfo(
+            frozenset(
+                {
+                    "attach_agent_session",
+                    "binding_routing",
+                    "local_endpoint_v2",
+                }
+            ),
+            "npipe",
+            self.instance_id,
+        )
 
     def attach_agent_session(self, *args):
         if self.failures:
@@ -86,8 +117,161 @@ def due(database: EventDatabase, event_id: int) -> None:
 
 
 class WorkerTests(unittest.TestCase):
+    def test_malformed_endpoint_response_keeps_event_queued(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            settings, work = make_settings(root)
+            rollout_id = "019fab53-93d9-7032-aecf-29b5f9bcc362"
+            transcript = write_rollout(settings.codex_home, rollout_id, work, "hello", "turn-1")
+            database = EventDatabase(settings.database_path)
+            inbox_id, _ = database.enqueue(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "temporary",
+                    "transcript_path": str(transcript),
+                    "cwd": str(work),
+                    "prompt": "hello",
+                }
+            )
+            worker = self.make_worker(
+                settings,
+                FakePlatform(),
+                FakeBridge(inspect_error=http.client.BadStatusLine("not-http")),
+            )
+
+            self.assertTrue(worker.run_once())
+
+            self.assertEqual(database.get_event(inbox_id).state, "binding_chat")
+
+    def test_unsafe_endpoint_keeps_event_queued(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            settings, work = make_settings(root)
+            rollout_id = "019fab53-93d9-7032-aecf-29b5f9bcc362"
+            transcript = write_rollout(settings.codex_home, rollout_id, work, "hello", "turn-1")
+            database = EventDatabase(settings.database_path)
+            inbox_id, _ = database.enqueue(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "temporary",
+                    "transcript_path": str(transcript),
+                    "cwd": str(work),
+                    "prompt": "hello",
+                }
+            )
+            platform = FakePlatform()
+            worker = EventWorker(
+                settings,
+                lambda _: None,
+                platform_factory=lambda _: platform,
+                endpoint_security_checker=lambda _name, _endpoint: [
+                    SecurityCheck("endpoint ACL", False, "broad principal")
+                ],
+            )
+            worker.coordinator.bridge = FakeBridge()
+            worker.claude_coordinator.bridge = worker.coordinator.bridge
+
+            self.assertTrue(worker.run_once())
+
+            self.assertEqual(database.get_event(inbox_id).state, "binding_chat")
+            self.assertEqual(platform.created, {})
+            self.assertEqual(platform.sent, [])
+
+    def test_unavailable_endpoint_keeps_existing_binding_event_queued(self) -> None:
+        from agent_chat_session_sync.models import Binding
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            settings, work = make_settings(root)
+            rollout_id = "019fab53-93d9-7032-aecf-29b5f9bcc362"
+            transcript = write_rollout(settings.codex_home, rollout_id, work, "hello", "turn-1")
+            database = EventDatabase(settings.database_path)
+            database.put_binding(
+                rollout_id,
+                Binding(
+                    "oc_existing",
+                    "feishu:oc_existing:ou_user",
+                    "project",
+                    str(work),
+                    1,
+                    "now",
+                    "Existing",
+                ),
+            )
+            inbox_id, _ = database.enqueue(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "temporary",
+                    "transcript_path": str(transcript),
+                    "cwd": str(work),
+                    "prompt": "hello",
+                }
+            )
+            platform = FakePlatform()
+            worker = self.make_worker(
+                settings,
+                platform,
+                FakeBridge(inspect_failures=1),
+            )
+
+            self.assertTrue(worker.run_once())
+
+            self.assertEqual(database.get_event(inbox_id).state, "binding_chat")
+            self.assertEqual(platform.sent, [])
+            self.assertEqual(database.outbox_for_rollout(rollout_id), [])
+
+    def test_unavailable_endpoint_defers_new_binding_before_chat_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            settings, work = make_settings(root)
+            rollout_id = "019fab53-93d9-7032-aecf-29b5f9bcc362"
+            transcript = write_rollout(settings.codex_home, rollout_id, work, "hello", "turn-1")
+            database = EventDatabase(settings.database_path)
+            inbox_id, _ = database.enqueue(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "temporary",
+                    "transcript_path": str(transcript),
+                    "cwd": str(work),
+                    "prompt": "hello",
+                }
+            )
+            platform = FakePlatform()
+            bridge = FakeBridge(inspect_failures=1)
+            worker = self.make_worker(settings, platform, bridge)
+
+            self.assertTrue(worker.run_once())
+
+            self.assertEqual(database.get_event(inbox_id).state, "binding_chat")
+            self.assertEqual(platform.created, {})
+            self.assertEqual(database.outbox_for_rollout(rollout_id), [])
+            self.assertEqual(bridge.attached, [])
+
+    def test_worker_uses_resolved_local_endpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            settings, _work = make_settings(root)
+            settings = Settings(
+                settings.data_dir,
+                settings.cc_config,
+                settings.cc_socket,
+                settings.codex_home,
+                settings.claude_home,
+                LocalEndpoint("npipe", "./pipe/cc-connect-api-test"),
+            )
+
+            worker = EventWorker(settings, lambda _: None, platform_factory=lambda _: FakePlatform())
+
+            self.assertEqual(worker.coordinator.bridge.endpoint, settings.local_endpoint)
+            self.assertEqual(worker.claude_coordinator.bridge.endpoint, settings.local_endpoint)
+
     def make_worker(self, settings: Settings, platform: FakePlatform, bridge: FakeBridge) -> EventWorker:
-        worker = EventWorker(settings, lambda _: None, platform_factory=lambda _: platform)
+        worker = EventWorker(
+            settings,
+            lambda _: None,
+            platform_factory=lambda _: platform,
+            endpoint_security_checker=lambda _name, _endpoint: [],
+        )
         worker.coordinator.bridge = bridge
         worker.claude_coordinator.bridge = bridge
         return worker
@@ -248,11 +432,10 @@ type = "feishu"
             self.assertEqual(bridge.attached[0][0], "claude-project")
             self.assertEqual(database.get_binding(f"claudecode:{session_id}").project, "claude-project")
 
-    def test_worker_replays_bindings_when_cc_connect_socket_changes(self) -> None:
+    def test_worker_replays_bindings_when_cc_connect_instance_changes(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             settings, _work = make_settings(root)
-            settings.cc_socket.touch()
             database = EventDatabase(settings.database_path)
             from agent_chat_session_sync.models import Binding
 
@@ -267,8 +450,7 @@ type = "feishu"
             self.assertEqual(bridge.attached[0][2], "a0b1c2d3-1111-2222-3333-444455556666")
             worker._maybe_replay_bindings()
             self.assertEqual(len(bridge.attached), 1)
-            settings.cc_socket.unlink()
-            settings.cc_socket.touch()
+            bridge.instance_id = "instance-2"
             worker._maybe_replay_bindings()
             self.assertEqual(len(bridge.attached), 2)
 

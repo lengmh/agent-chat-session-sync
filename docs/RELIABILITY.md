@@ -40,8 +40,13 @@ Claude Code uses the same waiting-state contract, but its stable identity is the
 the Hook `transcript_path`, then the native session file, `history.jsonl`, delayed transcript discovery, and finally multi-factor
 correlation. Codex and Claude receipt, outbox, and binding identities are namespaced so equal UUID strings cannot collide.
 
-Dynamic Feishu routes live in cc-connect memory. The durable copy remains in SQLite; the worker replays all bindings on startup
-and whenever the cc-connect Socket inode or modification time changes.
+Dynamic Feishu routes live in cc-connect memory. The durable copy remains in SQLite. The worker discovers cc-connect through
+the permission-protected Local Endpoint and replays all bindings on the first successful connection and whenever the reported
+process-level `instance_id` changes. Binding replay never replays messages.
+
+An unavailable, insecure, or incompatible Local Endpoint leaves the inbox record in `binding_chat` with backoff. The worker
+does not create a new Feishu chat or deliver an existing binding's queued event until endpoint security, capabilities, and
+binding replay are ready.
 
 ## Outbox and idempotency
 

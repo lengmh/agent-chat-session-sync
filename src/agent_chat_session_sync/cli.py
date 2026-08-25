@@ -26,6 +26,7 @@ from .locking import LockUnavailableError, exclusive_file_lock
 from .models import Binding
 from .permissions import (
     codex_permission_config_checks,
+    local_endpoint_security_checks,
     private_path_security_checks,
     socket_security_checks,
 )
@@ -38,7 +39,6 @@ from .worker import EventWorker
 def _doctor(settings: Settings) -> int:
     checks = [
         ("cc-connect config", settings.cc_config.is_file(), str(settings.cc_config)),
-        ("cc-connect socket", settings.cc_socket.exists(), str(settings.cc_socket)),
         ("Codex sessions", (settings.codex_home / "sessions").is_dir(), str(settings.codex_home / "sessions")),
         ("Claude Code CLI", shutil.which("claude") is not None, shutil.which("claude") or "claude not found"),
         ("Claude sessions", (settings.claude_home / "projects").is_dir(), str(settings.claude_home / "projects")),
@@ -93,16 +93,41 @@ def _doctor(settings: Settings) -> int:
     checks.append(("Codex project", "codex" in agent_types, "Codex + Feishu"))
     checks.append(("Claude project", "claudecode" in agent_types, "Claude Code + Feishu"))
     checks.append(("shared Bot routing", routing_ok, "binding_routing=true for projects sharing app_id"))
-    bridge = CCConnectBridge(settings.cc_socket)
-    attach = bridge.supports_attach() if settings.cc_socket.exists() else False
-    checks.append(("bind-agent extension", attach, "POST /sessions/bind-agent"))
-    capabilities = bridge.capabilities() if settings.cc_socket.exists() else set()
+    bridge = CCConnectBridge(settings.local_endpoint)
+    try:
+        bridge_info = bridge.inspect()
+        capabilities = set(bridge_info.capabilities)
+        endpoint_ok = True
+        endpoint_detail = (
+            f"{settings.local_endpoint} transport={bridge_info.transport} "
+            f"instance_id={bridge_info.instance_id}"
+        )
+    except Exception as exc:
+        bridge_info = None
+        capabilities = set()
+        endpoint_ok = False
+        endpoint_detail = f"{settings.local_endpoint}: {exc}"
+    checks.append(("cc-connect endpoint", endpoint_ok, endpoint_detail))
+    checks.append(
+        (
+            "bind-agent extension",
+            "attach_agent_session" in capabilities,
+            "GET /sessions/bind-agent",
+        )
+    )
     checks.append(("binding routing extension", "binding_routing" in capabilities, "GET /sessions/bind-agent"))
     checks.append(
         (
             "external rollout refresh",
             "external_session_refresh" in capabilities,
             "recycle stale Codex process before platform message",
+        )
+    )
+    checks.append(
+        (
+            "local endpoint v2",
+            "local_endpoint_v2" in capabilities,
+            "transport and instance_id discovery",
         )
     )
     try:
@@ -124,7 +149,10 @@ def _doctor(settings: Settings) -> int:
             capture_output=True,
         )
         checks.append(("durable worker service", service.returncode == 0, "LaunchAgent running"))
-    for check in socket_security_checks("cc-connect socket", settings.cc_socket):
+    for check in local_endpoint_security_checks(
+        "cc-connect endpoint",
+        settings.local_endpoint,
+    ):
         checks.append((check.name, check.okay, check.detail))
     if configured:
         for check in codex_permission_config_checks(config):
@@ -311,7 +339,7 @@ def provenance_checks(
 def _migrate_state(settings: Settings, source: Path) -> int:
     source_state = json.loads(source.expanduser().read_text(encoding="utf-8"))
     config = load_cc_connect_config(settings.cc_config)
-    bridge = CCConnectBridge(settings.cc_socket)
+    bridge = CCConnectBridge(settings.local_endpoint)
     migrated = 0
     skipped = 0
     from .config import matching_project

@@ -12,7 +12,9 @@ from .agents.claude_code import ClaudeCodeAdapter
 from .bridges.cc_connect import CCConnectBridge
 from .config import Settings, load_cc_connect_config, matching_project
 from .coordinator import PlatformFactory, SessionCoordinator
+from .endpoints import LocalEndpoint
 from .models import ResolutionResult
+from .permissions import SecurityCheck, local_endpoint_security_checks
 from .platforms.feishu import FeishuPlatform
 from .queue import EventDatabase, SQLiteBindingStore, stable_event_id
 from .resolver import CodexSessionResolver
@@ -25,6 +27,10 @@ class EventWorker:
         settings: Settings,
         logger: Callable[[str], None],
         platform_factory: PlatformFactory | None = None,
+        endpoint_security_checker: Callable[
+            [str, LocalEndpoint],
+            list[SecurityCheck],
+        ] = local_endpoint_security_checks,
     ):
         self.settings = settings
         self.logger = logger
@@ -40,9 +46,10 @@ class EventWorker:
         self.platform_factory = platform_factory or (
             lambda project: FeishuPlatform.from_options(project.platform_options)
         )
+        self.endpoint_security_checker = endpoint_security_checker
         self.coordinator = SessionCoordinator(
             self.agent,
-            CCConnectBridge(settings.cc_socket),
+            CCConnectBridge(settings.local_endpoint),
             SQLiteBindingStore(self.database),
             self.config,
             logger,
@@ -50,26 +57,18 @@ class EventWorker:
         )
         self.claude_coordinator = SessionCoordinator(
             self.claude_agent,
-            CCConnectBridge(settings.cc_socket),
+            CCConnectBridge(settings.local_endpoint),
             SQLiteBindingStore(self.database),
             self.config,
             logger,
             platform_factory=self.platform_factory,
         )
-        self._route_replay_initialized = False
-        self._last_socket_signature: tuple[int, int] | None = None
+        self._last_bridge_instance_id: str | None = None
 
     def components(self, agent_type: str):
         if agent_type == "claudecode":
             return self.claude_agent, self.claude_resolver, self.claude_coordinator
         return self.agent, self.resolver, self.coordinator
-
-    def _socket_signature(self) -> tuple[int, int] | None:
-        try:
-            stat = self.settings.cc_socket.stat()
-        except OSError:
-            return None
-        return stat.st_ino, stat.st_mtime_ns
 
     def replay_bindings(self) -> tuple[int, int]:
         """Reattach durable bindings and rebuild dynamic Feishu routes.
@@ -101,15 +100,41 @@ class EventWorker:
             self.logger(f"binding replay complete replayed={replayed} failed={failed}")
         return replayed, failed
 
-    def _maybe_replay_bindings(self) -> None:
-        signature = self._socket_signature()
-        changed = signature is not None and (
-            not self._route_replay_initialized or signature != self._last_socket_signature
-        )
-        self._route_replay_initialized = True
-        self._last_socket_signature = signature
-        if changed:
-            self.replay_bindings()
+    def _maybe_replay_bindings(self) -> bool:
+        try:
+            security_checks = self.endpoint_security_checker(
+                "cc-connect endpoint",
+                self.settings.local_endpoint,
+            )
+        except Exception as exc:
+            self.logger(f"cc-connect endpoint security audit failed error={exc}")
+            return False
+        failed_checks = [check for check in security_checks if not check.okay]
+        if failed_checks:
+            detail = "; ".join(
+                f"{check.name}: {check.detail}" for check in failed_checks
+            )
+            self.logger(f"cc-connect endpoint rejected {detail}")
+            return False
+        try:
+            info = self.coordinator.bridge.inspect()
+        except Exception as exc:
+            self.logger(f"cc-connect endpoint unavailable error={exc}")
+            return False
+        required = {
+            "attach_agent_session",
+            "binding_routing",
+            "local_endpoint_v2",
+        }
+        if not required.issubset(info.capabilities):
+            return False
+        if info.instance_id == self._last_bridge_instance_id:
+            return True
+        _replayed, failed = self.replay_bindings()
+        if failed:
+            return False
+        self._last_bridge_instance_id = info.instance_id
+        return True
 
     def import_emergency_spool(self) -> int:
         spool = self.settings.data_dir / "emergency-inbox.jsonl"
@@ -146,7 +171,7 @@ class EventWorker:
         return float(min(300, max(1, 2 ** min(max(attempt - 1, 0), 8))))
 
     def run_once(self) -> bool:
-        self._maybe_replay_bindings()
+        bridge_ready = self._maybe_replay_bindings()
         self.import_emergency_spool()
         queued = self.database.claim_due()
         if queued is None:
@@ -219,6 +244,16 @@ class EventWorker:
                 "resolved",
                 "cwd is not covered by a Feishu cc-connect project",
                 self.retry_delay(queued.attempts),
+            )
+            return True
+
+        if not bridge_ready:
+            delay = self.retry_delay(queued.attempts)
+            error = "cc-connect local endpoint is unavailable or incompatible"
+            self.database.retry(queued.id, "binding_chat", error, delay)
+            self.logger(
+                f"event deferred inbox={queued.id} state=binding_chat attempts={queued.attempts} "
+                f"delay={delay} error={error}"
             )
             return True
 

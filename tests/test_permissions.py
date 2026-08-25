@@ -5,7 +5,9 @@ from pathlib import Path
 import socket
 import tempfile
 import unittest
+from unittest import mock
 
+from agent_chat_session_sync.endpoints import LocalEndpoint
 from agent_chat_session_sync.permissions import codex_permission_config_checks, socket_security_checks
 
 
@@ -56,6 +58,51 @@ class PermissionConfigTests(unittest.TestCase):
             }
         )
         self.assertFalse(next(check.okay for check in checks if check.name == "bad stdio transport"))
+
+
+@unittest.skipUnless(os.name == "nt", "Windows Named Pipe security contract")
+class NamedPipeSecurityTests(unittest.TestCase):
+    def test_restricted_named_pipe_dacl_passes(self) -> None:
+        import ntsecuritycon
+        import win32security
+
+        from agent_chat_session_sync.permissions import local_endpoint_security_checks
+        from agent_chat_session_sync.security import (
+            _current_windows_user_sid,
+            _windows_private_sids,
+        )
+
+        current = _current_windows_user_sid()
+        dacl = win32security.ACL()
+        for sid in _windows_private_sids(current):
+            dacl.AddAccessAllowedAceEx(
+                win32security.ACL_REVISION,
+                0,
+                ntsecuritycon.FILE_ALL_ACCESS,
+                sid,
+            )
+        descriptor = mock.Mock()
+        descriptor.GetSecurityDescriptorOwner.return_value = current
+        descriptor.GetSecurityDescriptorDacl.return_value = dacl
+        descriptor.GetSecurityDescriptorControl.return_value = (
+            win32security.SE_DACL_PROTECTED,
+            1,
+        )
+
+        with mock.patch(
+            "win32security.GetNamedSecurityInfo",
+            return_value=descriptor,
+        ) as get_security:
+            checks = local_endpoint_security_checks(
+                "cc-connect endpoint",
+                LocalEndpoint("npipe", "./pipe/cc-connect-api-test"),
+            )
+
+        self.assertTrue(all(check.okay for check in checks), checks)
+        self.assertEqual(
+            get_security.call_args.args[0],
+            r"\\.\pipe\cc-connect-api-test",
+        )
 
 
 @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "Unix socket security contract")

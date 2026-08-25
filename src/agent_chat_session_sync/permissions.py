@@ -6,6 +6,7 @@ from pathlib import Path
 import stat
 from typing import Any
 
+from .endpoints import LocalEndpoint
 from .security import audit_private_path
 
 
@@ -85,6 +86,96 @@ def socket_security_checks(name: str, path: Path, expected_uid: int | None = Non
     except OSError as exc:
         checks.append(SecurityCheck(f"{name} parent", False, str(exc)))
     return checks
+
+
+def local_endpoint_security_checks(
+    name: str,
+    endpoint: LocalEndpoint,
+) -> list[SecurityCheck]:
+    if endpoint.transport == "unix":
+        return socket_security_checks(name, Path(endpoint.address))
+    if os.name != "nt":
+        return [
+            SecurityCheck(
+                f"{name} ACL",
+                False,
+                "Windows Named Pipe ACL verification is unavailable on this platform",
+            )
+        ]
+    prefix = "./pipe/"
+    if not endpoint.address.startswith(prefix) or endpoint.address == prefix:
+        return [
+            SecurityCheck(
+                f"{name} ACL",
+                False,
+                f"invalid Windows Named Pipe endpoint: {endpoint}",
+            )
+        ]
+
+    import ntsecuritycon
+    import win32security
+
+    from .security import _current_windows_user_sid, _windows_private_sids
+
+    pipe_path = rf"\\.\pipe\{endpoint.address.removeprefix(prefix)}"
+    try:
+        descriptor = win32security.GetNamedSecurityInfo(
+            pipe_path,
+            win32security.SE_FILE_OBJECT,
+            win32security.OWNER_SECURITY_INFORMATION
+            | win32security.DACL_SECURITY_INFORMATION,
+        )
+        current_user = _current_windows_user_sid()
+        expected_sids = {
+            str(sid) for sid in _windows_private_sids(current_user)
+        }
+        owner = descriptor.GetSecurityDescriptorOwner()
+        dacl = descriptor.GetSecurityDescriptorDacl()
+        control, _revision = descriptor.GetSecurityDescriptorControl()
+    except Exception as exc:
+        return [SecurityCheck(f"{name} ACL", False, f"{pipe_path}: {exc}")]
+    if dacl is None:
+        return [
+            SecurityCheck(f"{name} owner", str(owner) == str(current_user), "owner=current-user"),
+            SecurityCheck(f"{name} principals", False, "DACL is missing"),
+            SecurityCheck(f"{name} access", False, "DACL is missing"),
+            SecurityCheck(f"{name} inheritance", False, "DACL is missing"),
+        ]
+
+    entries = [dacl.GetAce(index) for index in range(dacl.GetAceCount())]
+    allowed_entries = [
+        entry
+        for entry in entries
+        if entry[0][0] == win32security.ACCESS_ALLOWED_ACE_TYPE
+    ]
+    actual_sids = {str(entry[2]) for entry in allowed_entries}
+    return [
+        SecurityCheck(
+            f"{name} owner",
+            str(owner) == str(current_user),
+            "expected current user",
+        ),
+        SecurityCheck(
+            f"{name} principals",
+            len(entries) == len(allowed_entries) == 3
+            and actual_sids == expected_sids,
+            "expected current user, SYSTEM, and Administrators only",
+        ),
+        SecurityCheck(
+            f"{name} access",
+            all(
+                entry[1] == ntsecuritycon.FILE_ALL_ACCESS
+                for entry in allowed_entries
+            ),
+            "expected full access for each allowed principal",
+        ),
+        SecurityCheck(
+            f"{name} inheritance",
+            bool(control & win32security.SE_DACL_PROTECTED)
+            and all(entry[0][1] == 0 for entry in allowed_entries),
+            "expected protected explicit ACL",
+        ),
+    ]
 
 
 def codex_permission_config_checks(config: dict[str, Any]) -> list[SecurityCheck]:

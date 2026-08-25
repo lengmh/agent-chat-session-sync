@@ -10,12 +10,100 @@ import unittest
 from unittest import mock
 
 from agent_chat_session_sync import __version__
+from agent_chat_session_sync.bridges.cc_connect import BridgeInfo
+from agent_chat_session_sync.config import Settings
+from agent_chat_session_sync.endpoints import LocalEndpoint
 from agent_chat_session_sync.provenance import Provenance
 from agent_chat_session_sync.security import ensure_private_directory
 
 
 @unittest.skipUnless(os.name == "nt", "Windows CLI contract")
 class WindowsCLITests(unittest.TestCase):
+    def test_migrate_state_constructs_bridge_from_resolved_local_endpoint(self) -> None:
+        from agent_chat_session_sync import cli
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            config = root / "config.toml"
+            config.write_text("projects = []\n", encoding="utf-8")
+            source = root / "state.json"
+            source.write_text('{"sessions": {}}\n', encoding="utf-8")
+            settings = Settings(
+                root / "data",
+                config,
+                root / "legacy.sock",
+                root / ".codex",
+                root / ".claude",
+                LocalEndpoint("npipe", "./pipe/cc-connect-api-test"),
+            )
+            with mock.patch.object(cli, "CCConnectBridge") as bridge_type:
+                cli._migrate_state(settings, source)
+
+            bridge_type.assert_called_once_with(settings.local_endpoint)
+
+    def test_doctor_inspects_named_pipe_without_legacy_socket_file(self) -> None:
+        from agent_chat_session_sync import cli
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            config = root / "config.toml"
+            config.write_text("projects = []\n", encoding="utf-8")
+            settings = Settings(
+                root / "data",
+                config,
+                root / "missing-legacy.sock",
+                root / ".codex",
+                root / ".claude",
+                LocalEndpoint("npipe", "./pipe/cc-connect-api-test"),
+            )
+            with mock.patch.object(cli, "CCConnectBridge") as bridge_type, mock.patch.object(
+                cli,
+                "local_endpoint_security_checks",
+                return_value=[],
+                create=True,
+            ) as endpoint_security:
+                bridge_type.return_value.inspect.return_value = BridgeInfo(
+                    frozenset(
+                        {
+                            "attach_agent_session",
+                            "binding_routing",
+                            "external_session_refresh",
+                            "local_endpoint_v2",
+                        }
+                    ),
+                    "npipe",
+                    "instance-1",
+                )
+                cli._doctor(settings)
+
+            bridge_type.return_value.inspect.assert_called_once_with()
+            endpoint_security.assert_called_once_with(
+                "cc-connect endpoint",
+                settings.local_endpoint,
+            )
+
+    def test_doctor_constructs_bridge_from_resolved_local_endpoint(self) -> None:
+        from agent_chat_session_sync import cli
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            config = root / "config.toml"
+            config.write_text("projects = []\n", encoding="utf-8")
+            settings = Settings(
+                root / "data",
+                config,
+                root / "legacy.sock",
+                root / ".codex",
+                root / ".claude",
+                LocalEndpoint("npipe", "./pipe/cc-connect-api-test"),
+            )
+            with mock.patch.object(cli, "CCConnectBridge") as bridge_type:
+                bridge_type.return_value.supports_attach.return_value = False
+                bridge_type.return_value.capabilities.return_value = set()
+                cli._doctor(settings)
+
+            bridge_type.assert_called_once_with(settings.local_endpoint)
+
     def test_version_runs_without_importing_unix_only_modules(self) -> None:
         result = subprocess.run(
             [sys.executable, "-m", "agent_chat_session_sync", "--version"],
