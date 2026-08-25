@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
+import stat
 import tempfile
 import unittest
 import sqlite3
@@ -11,6 +13,27 @@ from agent_chat_session_sync.queue import EventDatabase, stable_event_id
 
 
 class EventDatabaseTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "POSIX SQLite file mode contract")
+    def test_wal_and_shared_memory_are_owner_only_while_connection_is_open(
+        self,
+    ) -> None:
+        previous_umask = os.umask(0)
+        try:
+            with tempfile.TemporaryDirectory() as raw:
+                path = Path(raw) / "events.sqlite3"
+                database = EventDatabase(path)
+                with database.connect():
+                    wal = Path(f"{path}-wal")
+                    shared_memory = Path(f"{path}-shm")
+                    self.assertTrue(wal.is_file())
+                    self.assertTrue(shared_memory.is_file())
+                    self.assertEqual(stat.S_IMODE(wal.stat().st_mode), 0o600)
+                    self.assertEqual(
+                        stat.S_IMODE(shared_memory.stat().st_mode), 0o600
+                    )
+        finally:
+            os.umask(previous_umask)
+
     def test_hook_duplicate_is_one_durable_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             database = EventDatabase(Path(raw) / "events.sqlite3")

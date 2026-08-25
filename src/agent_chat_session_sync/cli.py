@@ -24,7 +24,11 @@ from .installer import (
 )
 from .locking import LockUnavailableError, exclusive_file_lock
 from .models import Binding
-from .permissions import codex_permission_config_checks, socket_security_checks
+from .permissions import (
+    codex_permission_config_checks,
+    private_path_security_checks,
+    socket_security_checks,
+)
 from .runtime import hook_main, make_logger
 from .provenance import current_provenance, provenance_json, source_head
 from .queue import EventDatabase
@@ -41,6 +45,22 @@ def _doctor(settings: Settings) -> int:
         ("Codex Hook", (settings.codex_home / "hooks.json").is_file(), str(settings.codex_home / "hooks.json")),
         ("Claude Hook", (settings.claude_home / "settings.json").is_file(), str(settings.claude_home / "settings.json")),
     ]
+    for check in private_path_security_checks("data directory", settings.data_dir):
+        checks.append((check.name, check.okay, check.detail))
+    private_runtime_paths = (
+        ("SQLite database", settings.database_path),
+        ("SQLite WAL", Path(f"{settings.database_path}-wal")),
+        ("SQLite shared memory", Path(f"{settings.database_path}-shm")),
+        ("emergency spool", settings.data_dir / "emergency-inbox.jsonl"),
+        ("runtime log", settings.log_path),
+        ("worker log", settings.worker_log_path),
+        ("worker lock", settings.lock_path),
+    )
+    for name, path in private_runtime_paths:
+        if not path.exists():
+            continue
+        for check in private_path_security_checks(name, path):
+            checks.append((check.name, check.okay, check.detail))
     try:
         config = load_cc_connect_config(settings.cc_config)
         projects = config.get("projects", [])
@@ -181,13 +201,41 @@ def _hook_provenance(path: Path) -> dict[str, str]:
             break
     if not command:
         raise RuntimeError(f"installed Hook command not found in {path}")
-    parts = shlex.split(command)
+    parts = _split_command(command)
     if "-m" in parts and "agent_chat_session_sync" in parts:
         probe = parts[: parts.index("agent_chat_session_sync") + 1] + ["provenance", "--json"]
     else:
         probe = [parts[0], "provenance", "--json"]
     result = subprocess.run(probe, check=True, text=True, capture_output=True)
     return json.loads(result.stdout)
+
+
+def _split_command(command: str) -> list[str]:
+    if os.name != "nt":
+        return shlex.split(command)
+
+    import ctypes
+    from ctypes import wintypes
+
+    argc = ctypes.c_int()
+    command_line_to_argv = ctypes.WinDLL(
+        "shell32", use_last_error=True
+    ).CommandLineToArgvW
+    command_line_to_argv.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.POINTER(ctypes.c_int),
+    ]
+    command_line_to_argv.restype = ctypes.POINTER(wintypes.LPWSTR)
+    argv = command_line_to_argv(command, ctypes.byref(argc))
+    if not argv:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return [argv[index] for index in range(argc.value)]
+    finally:
+        local_free = ctypes.WinDLL("kernel32", use_last_error=True).LocalFree
+        local_free.argtypes = [wintypes.HLOCAL]
+        local_free.restype = wintypes.HLOCAL
+        local_free(argv)
 
 
 def _verify_install(

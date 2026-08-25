@@ -6,12 +6,21 @@ from pathlib import Path
 import stat
 from typing import Any
 
+from .security import audit_private_path
+
 
 @dataclass(frozen=True)
 class SecurityCheck:
     name: str
     okay: bool
     detail: str
+
+
+def private_path_security_checks(name: str, path: Path) -> list[SecurityCheck]:
+    return [
+        SecurityCheck(f"{name} {suffix}", okay, detail)
+        for suffix, okay, detail in audit_private_path(path)
+    ]
 
 
 def socket_security_checks(name: str, path: Path, expected_uid: int | None = None) -> list[SecurityCheck]:
