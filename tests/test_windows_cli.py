@@ -8,6 +8,8 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+from contextlib import redirect_stdout
+import io
 
 from agent_chat_session_sync import __version__
 from agent_chat_session_sync.bridges.cc_connect import BridgeInfo
@@ -19,6 +21,120 @@ from agent_chat_session_sync.security import ensure_private_directory
 
 @unittest.skipUnless(os.name == "nt", "Windows CLI contract")
 class WindowsCLITests(unittest.TestCase):
+    def test_configure_windows_defaults_to_redacted_check_mode(self) -> None:
+        from agent_chat_session_sync import cli
+
+        args = cli.build_parser().parse_args(["configure-windows"])
+
+        self.assertEqual(args.command, "configure-windows")
+        self.assertTrue(args.check)
+        self.assertFalse(args.apply)
+
+    def test_configure_windows_check_is_redacted_and_read_only(self) -> None:
+        from agent_chat_session_sync import cli
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            config = root / "config.toml"
+            config.write_text(
+                f'''[[projects]]
+name = "local-codex"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "{workspace.as_posix()}"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "cli_sensitive"
+app_secret = "super-secret"
+
+[[projects]]
+name = "local-claude"
+[projects.agent]
+type = "claudecode"
+[projects.agent.options]
+work_dir = "{workspace.as_posix()}"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "cli_sensitive"
+app_secret = "super-secret"
+''',
+                encoding="utf-8",
+            )
+            original = config.read_bytes()
+            settings = Settings(
+                root / "data",
+                config,
+                root / "legacy.sock",
+                root / ".codex",
+                root / ".claude",
+                LocalEndpoint("npipe", "./pipe/cc-connect-api-test"),
+            )
+            output = io.StringIO()
+
+            with redirect_stdout(output):
+                result = cli._configure_windows(settings, apply=False)
+
+            self.assertEqual(result, 0)
+            self.assertNotIn("super-secret", output.getvalue())
+            self.assertNotIn("cli_sensitive", output.getvalue())
+            self.assertEqual(config.read_bytes(), original)
+
+    def test_doctor_uses_identity_safe_windows_task_checks(self) -> None:
+        from agent_chat_session_sync import cli
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            settings = Settings(
+                root / "data",
+                root / "config.toml",
+                root / "legacy.sock",
+                root / ".codex",
+                root / ".claude",
+                LocalEndpoint("npipe", "./pipe/cc-connect-api-test"),
+            )
+            with mock.patch.object(
+                cli,
+                "installed_executable",
+                return_value=r"C:\Program Files\ACSS\agent-chat-session-sync.exe",
+            ), mock.patch.object(
+                cli.shutil,
+                "which",
+                return_value=r"C:\Program Files\PowerShell\7\pwsh.exe",
+            ), mock.patch.object(
+                cli,
+                "current_windows_user_sid_string",
+                return_value="S-1-5-21-1000",
+            ), mock.patch.object(
+                cli,
+                "worker_task_checks",
+                return_value=[("Windows worker Task running", True, "state=Running")],
+            ) as task_checks, mock.patch.object(
+                cli.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [],
+                    0,
+                    json.dumps(cli.current_provenance().to_dict()),
+                    "",
+                ),
+            ):
+                checks = cli._windows_worker_task_checks(settings)
+
+        self.assertEqual(
+            checks[0],
+            ("Windows worker package provenance", True, "matches current package"),
+        )
+        self.assertEqual(checks[1], ("Windows worker Task running", True, "state=Running"))
+        self.assertEqual(
+            task_checks.call_args.kwargs["wrapper"],
+            settings.data_dir / "service" / "worker.ps1",
+        )
+
     def test_migrate_state_constructs_bridge_from_resolved_local_endpoint(self) -> None:
         from agent_chat_session_sync import cli
 

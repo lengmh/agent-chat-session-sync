@@ -18,6 +18,14 @@ def _current_windows_user_sid():
         token.Close()
 
 
+def current_windows_user_sid_string() -> str:
+    if os.name != "nt":
+        raise OSError("Windows user SID is unavailable on this platform")
+    import win32security
+
+    return str(win32security.ConvertSidToStringSid(_current_windows_user_sid()))
+
+
 def _windows_private_sids(current_user):
     import win32security
 

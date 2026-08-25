@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 from typing import Literal
 
 
 LocalTransport = Literal["unix", "npipe"]
+
+
+def windows_default_local_endpoint(user_sid: str) -> "LocalEndpoint":
+    normalized_sid = user_sid.strip().upper()
+    if not normalized_sid:
+        raise ValueError("current user SID is required")
+    digest = hashlib.sha256(normalized_sid.encode("utf-8")).hexdigest()[:16]
+    return LocalEndpoint("npipe", f"./pipe/cc-connect-api-{digest}")
 
 
 @dataclass(frozen=True)

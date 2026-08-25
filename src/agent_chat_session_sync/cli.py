@@ -17,6 +17,7 @@ from .config import Settings, load_cc_connect_config
 from .installer import (
     install_codex_hooks,
     install_claude_hooks,
+    installed_executable,
     install_worker_service,
     uninstall_codex_hooks,
     uninstall_claude_hooks,
@@ -33,7 +34,106 @@ from .permissions import (
 from .runtime import hook_main, make_logger
 from .provenance import current_provenance, provenance_json, source_head
 from .queue import EventDatabase
+from .security import current_windows_user_sid_string
+from .windows_tasks import (
+    PowerShellTaskScheduler,
+    windows_worker_environment,
+    worker_task_checks,
+)
 from .worker import EventWorker
+from .windows_configurator import (
+    apply_windows_configuration,
+    plan_codex_permission_profile,
+    plan_windows_configuration,
+)
+
+
+class _ConfigureWindowsMode(argparse.Action):
+    def __call__(
+        self,
+        parser: argparse.ArgumentParser,
+        namespace: argparse.Namespace,
+        values: object,
+        option_string: str | None = None,
+    ) -> None:
+        apply = option_string == "--apply"
+        namespace.apply = apply
+        namespace.check = not apply
+
+
+def _windows_worker_task_checks(
+    settings: Settings,
+) -> list[tuple[str, bool, str]]:
+    executable = installed_executable()
+    if not executable:
+        return [
+            (
+                "Windows worker package provenance",
+                False,
+                "agent-chat-session-sync executable not found",
+            )
+        ]
+    powershell_value = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not powershell_value:
+        return [
+            (
+                "Windows worker PowerShell",
+                False,
+                "PowerShell 7 executable not found",
+            )
+        ]
+    try:
+        user_sid = current_windows_user_sid_string()
+        powershell = Path(powershell_value).resolve()
+        wrapper = settings.data_dir / "service" / "worker.ps1"
+        expected_provenance = current_provenance().to_dict()
+        probe = subprocess.run(
+            [executable, "provenance", "--json"],
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        try:
+            actual_provenance = json.loads(probe.stdout) if probe.returncode == 0 else {}
+        except json.JSONDecodeError:
+            actual_provenance = {}
+        identity_fields = ("git_commit", "package_path", "python_path")
+        provenance_ok = probe.returncode == 0 and all(
+            actual_provenance.get(field) == expected_provenance.get(field)
+            for field in identity_fields
+        )
+        checks = [
+            (
+                "Windows worker package provenance",
+                provenance_ok,
+                (
+                    "matches current package"
+                    if provenance_ok
+                    else "worker executable provenance does not match current package"
+                ),
+            )
+        ]
+        checks.extend(worker_task_checks(
+            wrapper=wrapper,
+            executable=Path(executable),
+            powershell=powershell,
+            user_sid=user_sid,
+            environment=windows_worker_environment(
+                settings.data_dir,
+                user_sid=user_sid,
+            ),
+            scheduler=PowerShellTaskScheduler(powershell),
+        ))
+        return checks
+    except Exception as exc:
+        return [
+            (
+                "Windows worker Task",
+                False,
+                f"{type(exc).__name__}",
+            )
+        ]
 
 
 def _doctor(settings: Settings) -> int:
@@ -149,6 +249,15 @@ def _doctor(settings: Settings) -> int:
             capture_output=True,
         )
         checks.append(("durable worker service", service.returncode == 0, "LaunchAgent running"))
+    elif os.name == "nt":
+        checks.extend(_windows_worker_task_checks(settings))
+        for name, path in (
+            ("worker service directory", settings.data_dir / "service"),
+            ("worker service wrapper", settings.data_dir / "service" / "worker.ps1"),
+        ):
+            if path.exists():
+                for check in private_path_security_checks(name, path):
+                    checks.append((check.name, check.okay, check.detail))
     for check in local_endpoint_security_checks(
         "cc-connect endpoint",
         settings.local_endpoint,
@@ -185,6 +294,41 @@ def _status(settings: Settings) -> int:
     print(f"database: {settings.database_path}")
     for key in sorted(stats):
         print(f"{key}: {stats[key]}")
+    return 0
+
+
+def _configure_windows(settings: Settings, *, apply: bool) -> int:
+    try:
+        plan = plan_windows_configuration(
+            settings.cc_config,
+            settings.local_endpoint,
+        )
+        codex_plan = plan_codex_permission_profile(
+            settings.codex_home / "config.toml",
+        )
+    except (OSError, RuntimeError, UnicodeError, ValueError) as exc:
+        print(
+            f"CONFLICT   cc-connect config: {settings.cc_config}; "
+            f"{type(exc).__name__}",
+        )
+        return 1
+    for line in plan.report_lines():
+        print(line)
+    for line in codex_plan.report_lines():
+        print(line)
+    if plan.has_conflicts or codex_plan.has_conflicts:
+        return 1
+    if not apply:
+        return 0
+    result = apply_windows_configuration(
+        plan,
+        settings.data_dir,
+        additional_plans=(codex_plan,),
+    )
+    if result.changed:
+        print(f"APPLIED    cc-connect config; backup={result.backup_dir}")
+    else:
+        print("CONSISTENT cc-connect config; no changes required")
     return 0
 
 
@@ -419,6 +563,24 @@ def build_parser() -> argparse.ArgumentParser:
         "configure-claude", help="clone Feishu settings into a routed Claude Code project"
     )
     configure_claude.add_argument("--project-name", default="")
+    configure_windows = subparsers.add_parser(
+        "configure-windows",
+        help="check or safely apply the Windows cc-connect configuration profile",
+    )
+    configure_windows.set_defaults(check=True, apply=False)
+    configure_mode = configure_windows.add_mutually_exclusive_group()
+    configure_mode.add_argument(
+        "--check",
+        nargs=0,
+        action=_ConfigureWindowsMode,
+        help="show redacted configuration checks without writing files (default)",
+    )
+    configure_mode.add_argument(
+        "--apply",
+        nargs=0,
+        action=_ConfigureWindowsMode,
+        help="back up and apply only non-conflicting Windows configuration changes",
+    )
     rename_projects = subparsers.add_parser(
         "rename-projects", help="rename Feishu Agent engines and migrate durable bindings"
     )
@@ -462,7 +624,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"installed worker: {install_worker_service(settings.data_dir)}")
         return 0
     if args.command == "uninstall-service":
-        print(f"removed worker: {uninstall_worker_service()}")
+        print(f"removed worker: {uninstall_worker_service(settings.data_dir)}")
         return 0
     if args.command == "doctor":
         return _doctor(settings)
@@ -500,6 +662,11 @@ def main(argv: list[str] | None = None) -> int:
         backup, name, created = configure_claude_project(settings.cc_config, args.project_name)
         print(f"{'created' if created else 'updated'} Claude project: {name}; backup: {backup}")
         return 0
+    if args.command == "configure-windows":
+        if os.name != "nt":
+            print("configure-windows requires Windows", file=sys.stderr)
+            return 2
+        return _configure_windows(settings, apply=args.apply)
     if args.command == "rename-projects":
         backup, renamed = rename_agent_projects(
             settings.cc_config, args.codex_name, args.claude_name

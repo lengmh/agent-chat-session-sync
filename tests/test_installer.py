@@ -12,7 +12,9 @@ from agent_chat_session_sync.installer import (
     hook_command,
     install_claude_hooks,
     install_codex_hooks,
+    install_worker_service,
     uninstall_codex_hooks,
+    uninstall_worker_service,
 )
 
 
@@ -60,6 +62,38 @@ class InstallerTests(unittest.TestCase):
             document = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(document["permissions"], {"allow": ["Read"]})
             self.assertEqual(len(document["hooks"]["Stop"]), 1)
+
+    def test_install_worker_service_routes_windows_to_task_scheduler(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "agent_chat_session_sync.installer.sys.platform",
+            "win32",
+        ), mock.patch(
+            "agent_chat_session_sync.installer._install_windows_worker_service",
+            return_value=Path(directory) / "service" / "worker.ps1",
+        ) as install_windows:
+            result = install_worker_service(
+                Path(directory),
+                executable=r"C:\Program Files\ACSS\agent-chat-session-sync.exe",
+            )
+
+        self.assertEqual(result, Path(directory) / "service" / "worker.ps1")
+        install_windows.assert_called_once_with(
+            Path(directory),
+            r"C:\Program Files\ACSS\agent-chat-session-sync.exe",
+        )
+
+    def test_uninstall_worker_service_routes_windows_to_task_scheduler(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, mock.patch(
+            "agent_chat_session_sync.installer.sys.platform",
+            "win32",
+        ), mock.patch(
+            "agent_chat_session_sync.installer._uninstall_windows_worker_service",
+            return_value=Path(directory) / "service" / "worker.ps1",
+        ) as uninstall_windows:
+            result = uninstall_worker_service(Path(directory))
+
+        self.assertEqual(result, Path(directory) / "service" / "worker.ps1")
+        uninstall_windows.assert_called_once_with(Path(directory))
 
     def test_installed_executable_uses_current_venv_even_when_path_omits_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

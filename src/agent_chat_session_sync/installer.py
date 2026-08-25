@@ -12,6 +12,12 @@ import subprocess
 from typing import Any
 
 from .security import ensure_private_directory, harden_private_file
+from .windows_tasks import (
+    PowerShellTaskScheduler,
+    install_windows_worker_task,
+    uninstall_windows_worker_task,
+    windows_worker_environment,
+)
 
 
 DESCRIPTION = "Mirror local Codex and Claude Code sessions to dedicated cc-connect chat groups."
@@ -149,7 +155,35 @@ def worker_plist_path() -> Path:
     return Path.home() / "Library/LaunchAgents" / f"{WORKER_LABEL}.plist"
 
 
+def _install_windows_worker_service(
+    data_dir: Path,
+    executable: str | None,
+) -> Path:
+    executable = executable or installed_executable()
+    if not executable:
+        raise RuntimeError("agent-chat-session-sync executable not found")
+    powershell_value = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not powershell_value:
+        raise RuntimeError("PowerShell 7 executable not found")
+
+    from .security import current_windows_user_sid_string
+
+    user_sid = current_windows_user_sid_string()
+    environment = windows_worker_environment(data_dir, user_sid=user_sid)
+    powershell = Path(powershell_value).resolve()
+    return install_windows_worker_task(
+        data_dir,
+        executable=Path(executable),
+        powershell=powershell,
+        user_sid=user_sid,
+        environment=environment,
+        scheduler=PowerShellTaskScheduler(powershell),
+    )
+
+
 def install_worker_service(data_dir: Path, executable: str | None = None) -> Path:
+    if sys.platform == "win32":
+        return _install_windows_worker_service(data_dir, executable)
     if sys.platform != "darwin":
         raise RuntimeError("automatic worker service installation currently supports macOS LaunchAgent")
     executable = executable or installed_executable()
@@ -199,7 +233,30 @@ def install_worker_service(data_dir: Path, executable: str | None = None) -> Pat
     return path
 
 
-def uninstall_worker_service() -> Path:
+def _uninstall_windows_worker_service(data_dir: Path) -> Path:
+    powershell_value = shutil.which("pwsh.exe") or shutil.which("pwsh")
+    if not powershell_value:
+        raise RuntimeError("PowerShell 7 executable not found")
+
+    from .security import current_windows_user_sid_string
+
+    powershell = Path(powershell_value).resolve()
+    wrapper = data_dir.resolve() / "service" / "worker.ps1"
+    return uninstall_windows_worker_task(
+        wrapper,
+        powershell=powershell,
+        user_sid=current_windows_user_sid_string(),
+        scheduler=PowerShellTaskScheduler(powershell),
+    )
+
+
+def uninstall_worker_service(data_dir: Path | None = None) -> Path:
+    if sys.platform == "win32":
+        if data_dir is None:
+            from .config import Settings
+
+            data_dir = Settings.from_env().data_dir
+        return _uninstall_windows_worker_service(data_dir)
     path = worker_plist_path()
     if sys.platform == "darwin" and path.exists():
         subprocess.run(

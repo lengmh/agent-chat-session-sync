@@ -6,7 +6,7 @@ from pathlib import Path
 import tomllib
 from typing import Any
 
-from .endpoints import LocalEndpoint
+from .endpoints import LocalEndpoint, windows_default_local_endpoint
 from .models import Project
 
 
@@ -44,13 +44,24 @@ class Settings:
             default_data_dir = home / ".local/share/agent-chat-session-sync"
         data_dir = Path(os.environ.get("ACSS_DATA_DIR", default_data_dir))
         endpoint_value = os.environ.get("CC_CONNECT_ENDPOINT")
+        if endpoint_value:
+            endpoint = LocalEndpoint.parse(endpoint_value)
+        elif os.name == "nt":
+            import win32security
+
+            from .security import _current_windows_user_sid
+
+            sid = win32security.ConvertSidToStringSid(_current_windows_user_sid())
+            endpoint = windows_default_local_endpoint(sid)
+        else:
+            endpoint = None
         return cls(
             data_dir=data_dir.expanduser(),
             cc_config=Path(os.environ.get("CC_CONNECT_CONFIG", home / ".cc-connect/config.toml")).expanduser(),
             cc_socket=Path(os.environ.get("CC_CONNECT_SOCKET", home / ".cc-connect/run/api.sock")).expanduser(),
             codex_home=Path(os.environ.get("CODEX_HOME", home / ".codex")).expanduser(),
             claude_home=Path(os.environ.get("CLAUDE_HOME", home / ".claude")).expanduser(),
-            cc_endpoint=LocalEndpoint.parse(endpoint_value) if endpoint_value else None,
+            cc_endpoint=endpoint,
         )
 
     @property

@@ -1,6 +1,9 @@
 import unittest
 
-from agent_chat_session_sync.endpoints import LocalEndpoint
+from agent_chat_session_sync.endpoints import (
+    LocalEndpoint,
+    windows_default_local_endpoint,
+)
 
 
 class LocalEndpointTests(unittest.TestCase):
@@ -9,6 +12,14 @@ class LocalEndpointTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(ValueError, "local endpoint transport"):
                     LocalEndpoint.parse(value)
+
+    def test_windows_default_endpoint_uses_sid_hash(self) -> None:
+        endpoint = windows_default_local_endpoint("S-1-5-21-1000")
+
+        self.assertEqual(
+            str(endpoint),
+            "npipe://./pipe/cc-connect-api-f051b5cbf3c10c7c",
+        )
 
 
 if __name__ == "__main__":
