@@ -3,24 +3,68 @@ name: ci
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   python:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m pip install .
+      - run: python -m pip install ".[dev]"
       - run: python -m unittest discover -s tests -v
       - run: python -m compileall -q src tests
+      - run: python -m build --outdir "${{ runner.temp }}/package-dist"
+      - name: Install and exercise wheel
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/acss-wheel"
+          "$RUNNER_TEMP/acss-wheel/bin/python" -m pip install "$RUNNER_TEMP"/package-dist/*.whl
+          "$RUNNER_TEMP/acss-wheel/bin/agent-chat-session-sync" --version
+          "$RUNNER_TEMP/acss-wheel/bin/agent-chat-session-sync" provenance --json
+      - name: Install and exercise wheel
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $wheel = @(Get-ChildItem -LiteralPath "$env:RUNNER_TEMP/package-dist" -Filter '*.whl')
+          if ($wheel.Count -ne 1) { throw "expected one wheel, found $($wheel.Count)" }
+          python -m venv "$env:RUNNER_TEMP/acss-wheel"
+          $python = "$env:RUNNER_TEMP/acss-wheel/Scripts/python.exe"
+          & $python -m pip install $wheel[0].FullName
+          & "$env:RUNNER_TEMP/acss-wheel/Scripts/agent-chat-session-sync.exe" --version
+          & "$env:RUNNER_TEMP/acss-wheel/Scripts/agent-chat-session-sync.exe" provenance --json
+      - name: Install and exercise source distribution
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/acss-sdist"
+          "$RUNNER_TEMP/acss-sdist/bin/python" -m pip install "$RUNNER_TEMP"/package-dist/*.tar.gz
+          "$RUNNER_TEMP/acss-sdist/bin/agent-chat-session-sync" --version
+          "$RUNNER_TEMP/acss-sdist/bin/agent-chat-session-sync" provenance --json
+      - name: Install and exercise source distribution
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdist = @(Get-ChildItem -LiteralPath "$env:RUNNER_TEMP/package-dist" -Filter '*.tar.gz')
+          if ($sdist.Count -ne 1) { throw "expected one sdist, found $($sdist.Count)" }
+          python -m venv "$env:RUNNER_TEMP/acss-sdist"
+          $python = "$env:RUNNER_TEMP/acss-sdist/Scripts/python.exe"
+          & $python -m pip install $sdist[0].FullName
+          & "$env:RUNNER_TEMP/acss-sdist/Scripts/agent-chat-session-sync.exe" --version
+          & "$env:RUNNER_TEMP/acss-sdist/Scripts/agent-chat-session-sync.exe" provenance --json
 
   cc-connect:
     runs-on: ubuntu-latest
@@ -33,34 +77,190 @@ jobs:
       - run: ./scripts/build-cc-connect.sh
       - run: test -x dist/cc-connect
 
+  cc-connect-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.x"
+          cache: false
+      - run: python -m pip install .
+      - name: Build patched cc-connect for Windows x64
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $source = "$env:RUNNER_TEMP/cc-connect-source"
+          $output = "$env:RUNNER_TEMP/cc-connect-windows-x64.exe"
+          ./scripts/build-cc-connect-windows.ps1 `
+            -TempRoot $env:RUNNER_TEMP `
+            -SourceDir $source `
+            -Output $output
+          "ACSS_CC_CONNECT_SOURCE=$source" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ACSS_GO=$((Get-Command go -ErrorAction Stop).Source)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ACSS_TEMP_DIR=$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Exercise the real patched Named Pipe listener
+        shell: pwsh
+        run: python -m unittest tests.test_cc_connect_integration -v
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cc-connect-windows-x64
+          path: ${{ runner.temp }}/cc-connect-windows-x64.exe
+          if-no-files-found: error
+
+  windows-task-lifecycle:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Register, start, verify, and remove a unique current-user Task
+        shell: pwsh
+        env:
+          ACSS_TASK_FOLDER: AgentChatSessionSync-CI-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $TASK_LOGON_INTERACTIVE_TOKEN = 3
+          $TASK_RUNLEVEL_LUA = 0
+          $TASK_INSTANCES_IGNORE_NEW = 2
+          $TASK_CREATE_OR_UPDATE = 6
+          $TASK_TRIGGER_LOGON = 9
+          $TASK_ACTION_EXEC = 0
+          $TASK_STATE_RUNNING = 4
+
+          $service = New-Object -ComObject 'Schedule.Service'
+          $service.Connect()
+          $root = $service.GetFolder('\')
+          $folder = $null
+          $taskRegistered = $false
+          $wrapper = "$env:RUNNER_TEMP/$env:ACSS_TASK_FOLDER-worker.ps1"
+          $failure = $null
+          $cleanupErrors = [Collections.Generic.List[string]]::new()
+          @'
+          $ErrorActionPreference = 'Stop'
+          Start-Sleep -Seconds 300
+          '@ | Set-Content -LiteralPath $wrapper -Encoding utf8
+
+          try {
+              $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+              $pwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
+              $folder = $root.CreateFolder($env:ACSS_TASK_FOLDER, $null)
+              $definition = $service.NewTask(0)
+              $definition.RegistrationInfo.Description = 'agent-chat-session-sync CI lifecycle check'
+              $definition.Settings.Enabled = $true
+              $definition.Settings.AllowDemandStart = $true
+              $definition.Settings.ExecutionTimeLimit = 'PT0S'
+              $definition.Settings.MultipleInstances = $TASK_INSTANCES_IGNORE_NEW
+              $definition.Principal.UserId = $sid
+              $definition.Principal.LogonType = $TASK_LOGON_INTERACTIVE_TOKEN
+              $definition.Principal.RunLevel = $TASK_RUNLEVEL_LUA
+              $trigger = $definition.Triggers.Create($TASK_TRIGGER_LOGON)
+              $trigger.UserId = $sid
+              $action = $definition.Actions.Create($TASK_ACTION_EXEC)
+              $action.Path = $pwsh
+              $action.Arguments = "-NoProfile -NonInteractive -File `"$wrapper`""
+
+              $task = $folder.RegisterTaskDefinition(
+                  'Worker',
+                  $definition,
+                  $TASK_CREATE_OR_UPDATE,
+                  $sid,
+                  $null,
+                  $TASK_LOGON_INTERACTIVE_TOKEN,
+                  $null
+              )
+              $taskRegistered = $true
+              $null = $task.Run($null)
+              $deadline = [DateTime]::UtcNow.AddSeconds(30)
+              do {
+                  Start-Sleep -Milliseconds 250
+                  $task = $folder.GetTask('Worker')
+              } while ($task.State -ne $TASK_STATE_RUNNING -and [DateTime]::UtcNow -lt $deadline)
+              if ($task.State -ne $TASK_STATE_RUNNING) {
+                  throw "test Task did not reach Running; state=$($task.State)"
+              }
+
+              $registered = $task.Definition
+              if ($registered.Principal.UserId -ne $sid) { throw 'Task SID mismatch' }
+              if ($registered.Principal.LogonType -ne $TASK_LOGON_INTERACTIVE_TOKEN) { throw 'Task is not InteractiveToken' }
+              if ($registered.Principal.RunLevel -ne $TASK_RUNLEVEL_LUA) { throw 'Task is not Limited privilege' }
+              if ($registered.Settings.MultipleInstances -ne $TASK_INSTANCES_IGNORE_NEW) { throw 'Task is not IgnoreNew' }
+              if ($registered.Actions.Count -ne 1) { throw 'Task action identity is ambiguous' }
+          }
+          catch {
+              $failure = $_
+          }
+          finally {
+              if ($null -ne $folder -and $taskRegistered) {
+                  try {
+                      $cleanupTask = $folder.GetTask('Worker')
+                      if ($cleanupTask.State -eq $TASK_STATE_RUNNING) {
+                          $cleanupTask.Stop(0)
+                          $stopDeadline = [DateTime]::UtcNow.AddSeconds(30)
+                          do {
+                              Start-Sleep -Milliseconds 250
+                              $cleanupTask = $folder.GetTask('Worker')
+                          } while (
+                              $cleanupTask.State -eq $TASK_STATE_RUNNING -and
+                              [DateTime]::UtcNow -lt $stopDeadline
+                          )
+                          if ($cleanupTask.State -eq $TASK_STATE_RUNNING) {
+                              throw "Task did not stop before cleanup; state=$($cleanupTask.State)"
+                          }
+                      }
+                      $folder.DeleteTask('Worker', 0)
+                  }
+                  catch { $cleanupErrors.Add("DeleteTask: $($_.Exception.Message)") }
+              }
+              try { $root.DeleteFolder($env:ACSS_TASK_FOLDER, 0) }
+              catch { $cleanupErrors.Add("DeleteFolder: $($_.Exception.Message)") }
+              try { Remove-Item -LiteralPath $wrapper -Force -ErrorAction Stop }
+              catch { $cleanupErrors.Add("wrapper: $($_.Exception.Message)") }
+          }
+          if ($null -ne $failure) { throw $failure }
+          if ($cleanupErrors.Count -ne 0) {
+              throw "Task lifecycle cleanup failed: $($cleanupErrors -join '; ')"
+          }
+
   release-artifacts:
+    needs: cc-connect-windows
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
-      - run: python -m pip install build
-      - run: ACSS_BUILD_COMMIT="$(git rev-parse HEAD)" python -m build
-      - run: python scripts/write-checksums.py dist
-      - run: python scripts/verify-release-artifacts.py dist
+          python-version: "3.14"
+      - uses: actions/download-artifact@v4
+        with:
+          name: cc-connect-windows-x64
+          path: ${{ runner.temp }}/cc-connect-windows
+      - run: python -m pip install uv
+      - name: Build and verify the exact Windows Alpha release bundle
+        env:
+          ACSS_WINDOWS_EXE: ${{ runner.temp }}/cc-connect-windows/cc-connect-windows-x64.exe
+        run: ./scripts/build-release.sh "$GITHUB_WORKSPACE/dist"
       - name: Install and exercise wheel from artifact
         run: |
           python -m venv /tmp/acss-wheel
-          /tmp/acss-wheel/bin/pip install dist/*.whl
+          /tmp/acss-wheel/bin/python -m pip install dist/*.whl
           HOME=/tmp/acss-home CODEX_HOME=/tmp/acss-home/.codex CLAUDE_HOME=/tmp/acss-home/.claude /tmp/acss-wheel/bin/agent-chat-session-sync --version
+          HOME=/tmp/acss-home CODEX_HOME=/tmp/acss-home/.codex CLAUDE_HOME=/tmp/acss-home/.claude /tmp/acss-wheel/bin/agent-chat-session-sync provenance --json
           HOME=/tmp/acss-home CODEX_HOME=/tmp/acss-home/.codex CLAUDE_HOME=/tmp/acss-home/.claude /tmp/acss-wheel/bin/agent-chat-session-sync install-hooks
           HOME=/tmp/acss-home CODEX_HOME=/tmp/acss-home/.codex CLAUDE_HOME=/tmp/acss-home/.claude /tmp/acss-wheel/bin/agent-chat-session-sync uninstall-hooks
-          /tmp/acss-wheel/bin/python -m unittest discover -s tests -v
       - name: Install source distribution in a clean environment
         run: |
           python -m venv /tmp/acss-sdist
-          /tmp/acss-sdist/bin/pip install dist/*.tar.gz
+          /tmp/acss-sdist/bin/python -m pip install dist/*.tar.gz
           /tmp/acss-sdist/bin/agent-chat-session-sync --version
+          /tmp/acss-sdist/bin/agent-chat-session-sync provenance --json
       - uses: actions/upload-artifact@v4
         with:
           name: release-artifacts
+          if-no-files-found: error
           path: |
             dist/*.whl
             dist/*.tar.gz
+            dist/cc-connect-windows-x64.exe
             dist/SHA256SUMS

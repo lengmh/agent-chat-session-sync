@@ -6,6 +6,10 @@ The latest tagged `0.x` release receives security fixes on a best-effort basis. 
 development snapshots are unsupported. This project is experimental and should run
 as an unprivileged desktop user; do not run either daemon as root.
 
+`0.6.0-alpha.1` adds best-effort support for Windows 11 x64 Alpha. Windows 10,
+ARM64, Windows SCM Service, cross-user shared deployments, and a shared Windows
+Codex App Server daemon are outside this support boundary.
+
 ## Reporting a vulnerability
 
 Use the repository Security tab and select **Report a vulnerability** so credentials,
@@ -28,6 +32,12 @@ required.
   unprivileged user unless a deliberately configured service group is used.
 - cc-connect and Codex App Server Unix Sockets must remain local and owner-only
   (`0600`), or group-only (`0660`) with a dedicated service group.
+- On Windows, the cc-connect Named Pipe DACL must allow only the current user SID,
+  SYSTEM, and Administrators. Everyone, Users, Authenticated Users, remote
+  transports, TCP fallback, and reverse-proxy exposure are not supported.
+- The Windows Alpha executable is unsigned. Verify `cc-connect-windows-x64.exe`
+  against the release `SHA256SUMS` before installation; a checksum is an integrity
+  check, not publisher authentication.
 - Feishu credentials stay in the local cc-connect configuration and must never be
   committed, bundled into artifacts, or pasted into issues.
 - Remote Agent turns inherit the configured Codex permission profile. Do not replace

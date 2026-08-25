@@ -3,6 +3,33 @@
 All notable user-facing changes are documented here. This project follows
 [Semantic Versioning](https://semver.org/) while remaining in experimental `0.x` development.
 
+## [0.6.0-alpha.1] - Unreleased
+
+### Added
+
+- Windows 11 x64 Alpha runtime support across the CLI, Hooks, SQLite, worker,
+  doctor, configuration checks, and current-user Task Scheduler lifecycle.
+- Restricted byte-mode Named Pipe transport for the patched cc-connect Local
+  Endpoint, including fail-closed DACL checks, transport capabilities, opaque
+  process `instance_id`, and durable binding replay after restart.
+- Transactional PowerShell 7 installer with `-WhatIf`, private per-operation
+  backups, independent component confirmations, SHA-256 verification, foreign
+  Task refusal, and manifest-based rollback.
+- Ubuntu/Windows Python 3.11–3.14 CI, Go 1.25.x Windows patch/build integration,
+  and a manual run-unique real Task Scheduler lifecycle check.
+- Exact release bundle validation for wheel, sdist,
+  `cc-connect-windows-x64.exe`, and `SHA256SUMS`.
+
+### Known limitations
+
+- Windows 10, ARM64, Windows SCM Service, cross-user shared deployment, and a
+  shared Windows Codex App Server daemon are not supported in this Alpha.
+- Windows Codex sessions use a per-session `stdio` App Server lifecycle.
+- `cc-connect-windows-x64.exe` is not Authenticode-signed; verify
+  `SHA256SUMS` before installation.
+- Rebuildability means pinned source/toolchain/lock/patch inputs and verified
+  contents, not byte-for-byte identical output across machines.
+
 ## [0.5.0-alpha.1] - 2026-07-31
 
 First public experimental release.
@@ -33,3 +60,4 @@ First public experimental release.
   attach/lifecycle interfaces are available upstream.
 
 [0.5.0-alpha.1]: https://github.com/Sanshix/agent-chat-session-sync/releases/tag/v0.5.0-alpha.1
+[0.6.0-alpha.1]: https://github.com/Sanshix/agent-chat-session-sync/compare/v0.5.0-alpha.1...v0.6.0-alpha.1

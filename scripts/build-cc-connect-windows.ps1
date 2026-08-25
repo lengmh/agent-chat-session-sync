@@ -3,7 +3,8 @@ param(
     [string]$SourceDir,
     [string]$Output,
     [string]$TempRoot = $(if ($env:ACSS_TEMP_DIR) { $env:ACSS_TEMP_DIR } else { [IO.Path]::GetTempPath() }),
-    [string]$GoCommand = 'go'
+    [string]$GoCommand = 'go',
+    [string]$BuildCommit
 )
 
 $ErrorActionPreference = 'Stop'
@@ -51,6 +52,17 @@ if (Test-Path -LiteralPath $SourceDir) {
 New-Item -ItemType Directory -Path $TempRoot -Force | Out-Null
 $git = (Get-Command git -ErrorAction Stop).Source
 $go = (Get-Command $GoCommand -ErrorAction Stop).Source
+if (-not $BuildCommit) {
+    $BuildCommit = (& $git -C $root rev-parse HEAD).Trim()
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Cannot determine the agent-chat-session-sync build commit.'
+    }
+}
+if ($BuildCommit -notmatch '^[0-9a-fA-F]{40}$') {
+    throw "BuildCommit must be a full 40-character Git commit: $BuildCommit"
+}
+$BuildCommit = $BuildCommit.ToLowerInvariant()
+$binaryProvenance = "acss:$BuildCommit;upstream:$revision"
 
 function Invoke-Checked {
     param(
@@ -105,6 +117,8 @@ try {
             '-trimpath'
             '-tags'
             'no_web goolm'
+            '-ldflags'
+            "-X main.version=v1.4.1-acss -X main.commit=$binaryProvenance -X main.buildTime=source:$BuildCommit"
             '-o'
             $stagedBinary
             './cmd/cc-connect'
@@ -123,6 +137,7 @@ try {
 
     Write-Host "built $Output"
     Write-Host "sha256 $hash"
+    Write-Host "provenance $binaryProvenance"
     Write-Host "source $SourceDir"
     Write-Host "log $logPath"
 }

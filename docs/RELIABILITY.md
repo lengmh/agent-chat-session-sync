@@ -3,7 +3,7 @@
 ## Processing contract
 
 The Codex and Claude Code Hooks are inbox writers, not synchronization workers. They serialize the unmodified Hook payload into
-`events.sqlite3` and returns immediately. If SQLite cannot accept the receipt, it appends the same payload to a mode-0600
+`events.sqlite3` and return immediately. If SQLite cannot accept the receipt, the Hook appends the same payload to a protected
 `emergency-inbox.jsonl`, calls `fsync`, and still avoids blocking the Codex turn. The worker atomically renames and imports
 that spool before claiming normal work.
 
@@ -44,6 +44,11 @@ Dynamic Feishu routes live in cc-connect memory. The durable copy remains in SQL
 the permission-protected Local Endpoint and replays all bindings on the first successful connection and whenever the reported
 process-level `instance_id` changes. Binding replay never replays messages.
 
+On Unix, Local Endpoint authorization is enforced with socket owner/mode checks.
+On Windows, the byte-mode Named Pipe DACL permits only the current user SID,
+SYSTEM, and Administrators. TCP, WebSocket, remote access, and transport fallback
+are rejected rather than treated as degraded operation.
+
 An unavailable, insecure, or incompatible Local Endpoint leaves the inbox record in `binding_chat` with backoff. The worker
 does not create a new Feishu chat or deliver an existing binding's queued event until endpoint security, capabilities, and
 binding replay are ready.
@@ -69,14 +74,25 @@ Every Hook receipt logs all of:
 service_version git_commit package_path python_path config_path
 ```
 
-The build stamps the wheel without modifying the source tree. `scripts/install.sh` refuses a dirty repository and invokes
-`verify-install`, which compares the repository HEAD, installed package stamp, and the package imported by the exact Hook
-command in `~/.codex/hooks.json`. A clean identity check proves which code runs; it does not replace live acceptance.
+The build stamps the wheel without modifying the source tree. Install and doctor
+checks compare the candidate commit, installed package stamp, and the package
+imported by the exact Hook command. On Windows they also verify the current-user
+Task Scheduler principal/action, wrapper content, and package executable provenance.
+A clean identity check proves which code runs; it does not replace candidate
+artifact verification or live acceptance.
 
 ## Operational storage
 
-- `events.sqlite3`: inbox, outbox, bindings and schema metadata; WAL, `synchronous=FULL`, mode 0600.
+- Windows data root: `%LOCALAPPDATA%\agent-chat-session-sync`, protected DACL inherited by SQLite/WAL, spool, logs, locks, backups, and service wrapper.
+- POSIX data root: `~/.local/share/agent-chat-session-sync`, directory mode 0700 and private files mode 0600.
+- `events.sqlite3`: inbox, outbox, bindings and schema metadata; WAL and `synchronous=FULL`.
 - `emergency-inbox.jsonl`: fsynced fallback receipts, imported by the worker.
 - `sync.log`: Hook receipts and import identity.
 - `worker.log`: resolution, retry, binding and delivery outcomes.
 - `state.json`: legacy import source only; new bindings live in SQLite.
+
+The Windows worker runs as the current interactive user through
+`\AgentChatSessionSync\Worker` with Limited privilege and `IgnoreNew`.
+The wrapper stops on exit codes 0 and 4; other nonzero exits wait 10 seconds before
+restarting. Install and uninstall refuse a same-name Task whose complete identity
+does not match the managed definition.

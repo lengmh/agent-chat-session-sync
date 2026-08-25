@@ -12,6 +12,8 @@ param(
     else {
         [IO.Path]::GetTempPath()
     }),
+    [string]$PythonPackage,
+    [string]$ExpectedPythonSha256,
     [string]$CcConnectBinary,
     [string]$CcConnectTarget,
     [string]$ExpectedCcConnectSha256,
@@ -314,6 +316,99 @@ function Rollback-Operation {
     return $errors
 }
 
+function Assert-RollbackContext {
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Context,
+        [Parameter(Mandatory)]
+        [string]$ManifestFile,
+        [Parameter(Mandatory)]
+        [string]$StateRoot,
+        [string]$ExplicitCcConnectTarget
+    )
+
+    $manifestDirectory = [IO.Path]::GetFullPath((Split-Path -Parent $ManifestFile))
+    if (
+        [IO.Path]::GetFullPath([string]$Context.backup_dir) -ne
+        $manifestDirectory
+    ) {
+        throw 'rollback manifest backup_dir does not match its parent directory'
+    }
+    $expectedVenv = [IO.Path]::GetFullPath((Join-Path $StateRoot 'venv'))
+    if ([IO.Path]::GetFullPath([string]$Context.venv_path) -ne $expectedVenv) {
+        throw 'rollback manifest venv_path does not match StateRoot'
+    }
+    $expectedAcss = [IO.Path]::GetFullPath(
+        (Join-Path $expectedVenv 'Scripts\agent-chat-session-sync.exe')
+    )
+    if (
+        [string]$Context.acss_executable -and
+        [IO.Path]::GetFullPath([string]$Context.acss_executable) -ne $expectedAcss
+    ) {
+        throw 'rollback manifest acss_executable does not match StateRoot'
+    }
+
+    $ccConfig = if ($env:CC_CONNECT_CONFIG) {
+        [IO.Path]::GetFullPath($env:CC_CONNECT_CONFIG)
+    }
+    else {
+        [IO.Path]::GetFullPath((Join-Path $HOME '.cc-connect\config.toml'))
+    }
+    $codexHome = if ($env:CODEX_HOME) {
+        [IO.Path]::GetFullPath($env:CODEX_HOME)
+    }
+    else {
+        [IO.Path]::GetFullPath((Join-Path $HOME '.codex'))
+    }
+    $claudeHome = if ($env:CLAUDE_HOME) {
+        [IO.Path]::GetFullPath($env:CLAUDE_HOME)
+    }
+    else {
+        [IO.Path]::GetFullPath((Join-Path $HOME '.claude'))
+    }
+    $allowedFiles = @{
+        $ccConfig = 'cc-connect-config.toml'
+        ([IO.Path]::GetFullPath((Join-Path $codexHome 'config.toml'))) = 'codex-config.toml'
+        ([IO.Path]::GetFullPath((Join-Path $codexHome 'hooks.json'))) = 'codex-hooks.json'
+        ([IO.Path]::GetFullPath((Join-Path $claudeHome 'settings.json'))) = 'claude-settings.json'
+        ([IO.Path]::GetFullPath((Join-Path $StateRoot 'service\worker.ps1'))) = 'worker.ps1'
+    }
+    foreach ($record in @($Context.files)) {
+        $recordPath = [IO.Path]::GetFullPath([string]$record.path)
+        if (-not $allowedFiles.ContainsKey($recordPath)) {
+            throw "rollback manifest contains unmanaged file path: $recordPath"
+        }
+        $expectedName = [string]$allowedFiles[$recordPath]
+        if ([bool]$record.existed -and [string]$record.backup -ne $expectedName) {
+            throw "rollback manifest has invalid backup name for $recordPath"
+        }
+        if ([string]$record.recovery -ne "$expectedName.created") {
+            throw "rollback manifest has invalid recovery name for $recordPath"
+        }
+    }
+
+    $hasBinaryOperation = (
+        [bool]$Context.binary_intent -or
+        [bool]$Context.binary_backup_moved -or
+        [bool]$Context.binary_new_installed -or
+        [bool]$Context.cc_connect_stopped -or
+        [bool]$Context.cc_connect_new_started -or
+        (Test-Path -LiteralPath (Join-Path $manifestDirectory 'cc-connect.exe') -PathType Leaf)
+    )
+    if ($hasBinaryOperation) {
+        if (-not $ExplicitCcConnectTarget) {
+            throw 'CcConnectTarget is required to roll back a binary operation'
+        }
+        $expectedTarget = [IO.Path]::GetFullPath($ExplicitCcConnectTarget)
+        if (
+            [IO.Path]::GetFullPath([string]$Context.cc_connect_target) -ne
+            $expectedTarget
+        ) {
+            throw 'rollback manifest cc_connect_target does not match CcConnectTarget'
+        }
+    }
+}
+
 if ($RollbackManifest) {
     $manifestFile = [IO.Path]::GetFullPath($RollbackManifest)
     $backupRoot = [IO.Path]::GetFullPath((Join-Path $StateRoot 'backups'))
@@ -328,6 +423,14 @@ if ($RollbackManifest) {
         Get-Content -LiteralPath $manifestFile -Raw -Encoding UTF8
         | ConvertFrom-Json -AsHashtable
     )
+    Assert-RollbackContext `
+        -Context $rollbackContext `
+        -ManifestFile $manifestFile `
+        -StateRoot $StateRoot `
+        -ExplicitCcConnectTarget $CcConnectTarget
+    if (-not $PSCmdlet.ShouldProcess($manifestFile, 'Roll back installation')) {
+        return
+    }
     $rollbackContext.status = 'rolling_back'
     Write-Manifest -Path $manifestFile -Manifest $rollbackContext
     $rollbackErrors = Rollback-Operation -Context $rollbackContext
@@ -358,6 +461,27 @@ if ($dirty) {
 $commit = (& $git -C $root rev-parse HEAD).Trim()
 if ($LASTEXITCODE -ne 0 -or -not $commit) {
     throw 'Unable to resolve the source commit.'
+}
+$pythonInstallSource = $root
+$pythonPackageHash = ''
+if ($PythonPackage -or $ExpectedPythonSha256) {
+    if (-not $PythonPackage -or -not $ExpectedPythonSha256) {
+        throw 'PythonPackage and ExpectedPythonSha256 must be supplied together.'
+    }
+    $PythonPackage = [IO.Path]::GetFullPath($PythonPackage)
+    if (-not (Test-Path -LiteralPath $PythonPackage -PathType Leaf)) {
+        throw "Python package candidate not found: $PythonPackage"
+    }
+    if ([IO.Path]::GetExtension($PythonPackage) -ne '.whl') {
+        throw "PythonPackage must be a wheel: $PythonPackage"
+    }
+    $pythonPackageHash = (
+        Get-FileHash -LiteralPath $PythonPackage -Algorithm SHA256
+    ).Hash.ToLowerInvariant()
+    if ($pythonPackageHash -ne $ExpectedPythonSha256.Trim().ToLowerInvariant()) {
+        throw "Python package SHA-256 mismatch: expected $ExpectedPythonSha256; actual $pythonPackageHash"
+    }
+    $pythonInstallSource = $PythonPackage
 }
 
 $doPython = $PSCmdlet.ShouldProcess(
@@ -409,6 +533,8 @@ $manifestPath = Join-Path $backupDir 'manifest.json'
 $context = @{
     operation_id = $operationId
     source_commit = $commit
+    python_package = $PythonPackage
+    python_package_sha256 = $pythonPackageHash
     backup_dir = $backupDir
     status = 'snapshot'
     files = @()
@@ -455,6 +581,29 @@ else {
 }
 
 try {
+    $stagedPythonPackage = $pythonInstallSource
+    if ($doPython -and $PythonPackage) {
+        $stagedPythonPackage = Join-Path $backupDir 'staged-python-package.whl'
+        [IO.File]::Copy($PythonPackage, $stagedPythonPackage, $false)
+        $stagedPythonHash = (
+            Get-FileHash -LiteralPath $stagedPythonPackage -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($stagedPythonHash -ne $pythonPackageHash) {
+            throw "staged Python package SHA-256 mismatch: expected $pythonPackageHash; actual $stagedPythonHash"
+        }
+    }
+    $stagedCcConnectBinary = $CcConnectBinary
+    if ($doBinary) {
+        $stagedCcConnectBinary = Join-Path $backupDir 'staged-cc-connect.exe'
+        [IO.File]::Copy($CcConnectBinary, $stagedCcConnectBinary, $false)
+        $stagedCcConnectHash = (
+            Get-FileHash -LiteralPath $stagedCcConnectBinary -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($stagedCcConnectHash -ne $candidateHash) {
+            throw "staged cc-connect SHA-256 mismatch: expected $candidateHash; actual $stagedCcConnectHash"
+        }
+    }
+
     if ($doPython) {
         $context.files += @(
             Backup-File -Source $ccConfig -BackupDirectory $backupDir -Name 'cc-connect-config.toml'
@@ -478,7 +627,7 @@ try {
                 (Join-Path $stagedVenv 'Scripts\python.exe')
                 '--force-reinstall'
                 '--no-cache'
-                $root
+                $stagedPythonPackage
             )
         }
         finally {
@@ -509,8 +658,17 @@ try {
         }
         $context.acss_executable = $acss
         $env:ACSS_DATA_DIR = $StateRoot
+        $installedProvenance = (& $acss provenance --json) | ConvertFrom-Json
+        if ($LASTEXITCODE -ne 0) {
+            throw "installed package provenance probe failed with code $LASTEXITCODE"
+        }
+        if (
+            $installedProvenance.git_commit -ne $commit -or
+            $installedProvenance.build_source -ne "git:$commit"
+        ) {
+            throw "installed Python package commit mismatch: expected $commit"
+        }
         Invoke-Checked $acss @('configure-windows', '--apply')
-        Invoke-Checked $acss @('provenance', '--json')
     }
     else {
         $context.acss_executable = Join-Path $venvPath 'Scripts\agent-chat-session-sync.exe'
@@ -582,7 +740,13 @@ try {
             $context.binary_backup_moved = $true
             Write-Manifest -Path $manifestPath -Manifest $context
         }
-        [IO.File]::Copy($CcConnectBinary, $CcConnectTarget, $false)
+        [IO.File]::Copy($stagedCcConnectBinary, $CcConnectTarget, $false)
+        $installedCcConnectHash = (
+            Get-FileHash -LiteralPath $CcConnectTarget -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($installedCcConnectHash -ne $candidateHash) {
+            throw "installed cc-connect SHA-256 mismatch: expected $candidateHash; actual $installedCcConnectHash"
+        }
         $context.binary_new_installed = $true
         Write-Manifest -Path $manifestPath -Manifest $context
         if ($RestartCcConnect -and [bool]$context.cc_connect_snapshot.running) {

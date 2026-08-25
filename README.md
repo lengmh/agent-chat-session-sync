@@ -3,7 +3,7 @@
 [![CI](https://github.com/Sanshix/agent-chat-session-sync/actions/workflows/ci.yml/badge.svg)](https://github.com/Sanshix/agent-chat-session-sync/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/Sanshix/agent-chat-session-sync?include_prereleases)](https://github.com/Sanshix/agent-chat-session-sync/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](pyproject.toml)
+[![Python 3.11–3.14](https://img.shields.io/badge/Python-3.11%E2%80%933.14-blue.svg)](pyproject.toml)
 
 把本地已经启动的 Codex / Claude Code 会话接入飞书：每个 Agent 会话自动创建一个专属群，并让飞书回复继续运行同一个本地会话。
 
@@ -13,7 +13,7 @@
 > an existing Codex rollout or Claude session, and resumes that exact session when
 > a user replies from Feishu.
 
-**发布状态：v0.5.0-alpha.1 · Experimental Alpha · macOS 自动安装 · Python 3.11+ · cc-connect v1.4.1 pinned patch set**
+**发布状态：v0.6.0-alpha.1 · Windows 11 x64 Alpha · macOS Experimental · Python 3.11–3.14 · cc-connect v1.4.1 pinned patch set**
 
 ## 你是否需要它
 
@@ -37,7 +37,8 @@
 | 绑定已经存在的 Codex rollout / Claude session | 支持 |
 | Codex Desktop 和飞书轮流更新同一会话 | 支持，发送前检测外部 rollout 更新并 resume |
 | Hook 失败后不丢消息 | 支持，SQLite inbox/outbox + emergency spool |
-| Slack、Telegram 或 Windows 自动安装 | 当前未实现 |
+| Windows 11 x64 自动配置和常驻 worker | Alpha：PowerShell 7 + 当前用户 Task Scheduler |
+| Slack、Telegram、Windows 10 或 ARM64 | 当前未实现 |
 
 不适合以下场景：只想从飞书发起新会话、希望一个群通过 thread 容纳多个会话，或者不愿维护 patched cc-connect。前两种场景优先直接使用
 [`cc-connect`](https://github.com/chenhg5/cc-connect)。
@@ -47,7 +48,7 @@
 把仓库 URL 和下面这段提示交给 Codex、Claude Code 或其他代码 Agent。它会先检查环境，不应直接覆盖你正在运行的服务：
 
 ```text
-请审查 agent-chat-session-sync 仓库，并在这台 macOS 机器上安装它。
+请审查 agent-chat-session-sync 仓库，并在这台 Windows 11 x64 机器上安装它。
 目标：把本地 Codex 和 Claude Code 已有会话同步到专属飞书群，飞书回复必须恢复同一个原生 session。
 
 执行前请先：
@@ -55,9 +56,10 @@
 2. 确认 cc-connect 与仓库锁定的 revision/patch 兼容；
 3. 备份现有 cc-connect 二进制与 Hook 配置；
 4. 不输出或提交 app_secret、token、open_id、chat_id、rollout 内容；
-5. 构建 patched cc-connect，运行 Python/Go 测试，再安装 Hook 和 LaunchAgent；
-6. 用 doctor 证明 Socket 权限和运行版本；
-7. 分别执行 Codex、Claude Code 的 acceptance-live，不能用 --skip-reply 代替双向验收。
+5. 验证候选发布物的 SHA256SUMS，再运行 PowerShell 安装器的 -WhatIf；
+6. 分别确认 Python/config、Hooks、当前用户 Task 和 cc-connect 二进制替换；
+7. 用 doctor 证明 Named Pipe DACL、Task identity、package 和 Hook provenance；
+8. 分别执行 Codex、Claude Code 的 acceptance-live，不能用 --skip-reply 代替双向验收。
 
 遇到缺权限、版本不匹配或现有服务来源不明时停止并向我说明，不要猜测部署成功。
 ```
@@ -100,9 +102,62 @@ SQLite inbox → agent-chat-session-sync worker
 cc-connect ↔ 飞书 → delivered + platform message ID
 ```
 
-## 快速开始（macOS）
+## 快速开始
 
 这不是单独执行一次 `pip install` 就能工作的纯 Python 工具。完整安装包含 Python daemon 和 pinned cc-connect patch 两部分。
+
+### Windows 11 x64 Alpha
+
+前置要求是 64 位 PowerShell 7、`uv`，以及已配置的 Codex、Claude Code 和飞书。先从同一候选发布取得 wheel、
+`cc-connect-windows-x64.exe` 和 `SHA256SUMS`，并确定当前 cc-connect 的实际目标路径。下面的占位路径必须由用户确认：
+
+```powershell
+$pythonPackage = (Resolve-Path .\agent_chat_session_sync-0.6.0a1-py3-none-any.whl).Path
+$ccConnect = (Resolve-Path .\cc-connect-windows-x64.exe).Path
+$ccConnectTarget = 'C:\path\to\active\cc-connect.exe'
+
+function Get-VerifiedSha256([string]$Path) {
+    $name = Split-Path -Leaf $Path
+    $entry = @(Get-Content .\SHA256SUMS | Where-Object { $_ -match "  $([regex]::Escape($name))$" })
+    if ($entry.Count -ne 1) { throw "SHA256SUMS must contain exactly one entry for $name" }
+    $expected = ($entry[0] -split '  ', 2)[0]
+    $actual = (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) { throw "SHA-256 mismatch: $name" }
+    return $expected
+}
+$pythonSha256 = Get-VerifiedSha256 $pythonPackage
+$ccConnectSha256 = Get-VerifiedSha256 $ccConnect
+
+pwsh -NoProfile -File .\scripts\install-windows.ps1 -WhatIf `
+  -PythonPackage $pythonPackage `
+  -ExpectedPythonSha256 $pythonSha256 `
+  -CcConnectBinary $ccConnect `
+  -CcConnectTarget $ccConnectTarget `
+  -ExpectedCcConnectSha256 $ccConnectSha256
+```
+
+确认检查结果后再运行安装器。Python/config、Hooks、当前用户 Task Scheduler worker 和 cc-connect 二进制替换是独立确认项；安装器遇到冲突或来源不明的同名 Task 会停止，不会强制覆盖：
+
+```powershell
+pwsh -NoProfile -File .\scripts\install-windows.ps1 `
+  -PythonPackage $pythonPackage `
+  -ExpectedPythonSha256 $pythonSha256 `
+  -CcConnectBinary $ccConnect `
+  -CcConnectTarget $ccConnectTarget `
+  -ExpectedCcConnectSha256 $ccConnectSha256
+
+$acss = Join-Path $env:LOCALAPPDATA 'agent-chat-session-sync\venv\Scripts\agent-chat-session-sync.exe'
+& $acss configure-windows --check
+& $acss doctor
+& $acss acceptance-live --agent codex --timeout 900
+& $acss acceptance-live --agent claudecode --timeout 900
+```
+
+Windows Alpha 使用受限 Named Pipe 和当前用户 Task Scheduler，不使用 TCP fallback 或 Windows SCM Service。Codex 固定使用每会话 `stdio` App Server lifecycle。
+不提供 candidate wheel 参数时，Python 会从 clean source checkout 安装；不提供三项 cc-connect 参数时不会替换二进制。
+这两种省略形式只适合开发或分阶段部署，不构成 candidate artifact 完整验收。
+
+### macOS Experimental
 
 ```bash
 # 1. 克隆本仓库并进入目录
@@ -124,7 +179,7 @@ cc-connect ↔ 飞书 → delivered + platform message ID
 ~/.local/share/agent-chat-session-sync/venv/bin/agent-chat-session-sync acceptance-live --agent claudecode --timeout 900
 ```
 
-`build-cc-connect.sh` 只产生二进制，不会替你覆盖或重启现有服务。这个限制是刻意的：部署路径和服务管理方式必须由本机管理员明确确认。
+两个平台的 cc-connect 构建入口都只产生二进制，不会替你覆盖或重启现有服务。部署路径、哈希验证和进程重启必须显式确认。
 
 ### 最小飞书权限
 
@@ -156,12 +211,13 @@ cc-connect ↔ 飞书 → delivered + platform message ID
 - Codex App Server 生命周期：飞书入站通过 `thread/resume`、`turn/start` 和实时 `thread/turn/item` 事件工作，不直接追加 rollout JSONL。
 - 飞书每次复用 Codex 进程前检查 rollout offset 与最新 turn ID；发现 Desktop 等其他客户端追加新 turn 时，先关闭旧进程并 resume 同一 rollout，再处理消息。
 - 支持 `stdio` 独立生命周期，以及通过 `codex app-server proxy` 连接持久 daemon 的共享生命周期。
-- `doctor` 校验服务 UID、Unix Socket 类型/owner/mode/group/父目录和 App Server 配置一致性。
+- `doctor` 校验 package/Hook provenance、Local Endpoint、安全存储和 worker 服务 identity；Unix 检查 owner/mode，Windows 检查 Named Pipe DACL 与 Task Scheduler。
 
-`0.5.0-alpha.1` 实现 `Codex + 飞书` 与 `Claude Code + 飞书`，并依赖 cc-connect 的 Unix Socket API。当前自动安装和常驻
-worker 服务只支持 macOS LaunchAgent；Linux 上的核心代码可以手工运行，但在 systemd 安装器完成前不属于正式支持范围。
+`0.6.0-alpha.1` 正式增加 Windows 11 x64 Alpha，使用受限 Named Pipe、本地受保护数据目录和当前用户 Task Scheduler。
+Windows 10、ARM64、Windows SCM Service、跨用户共享以及 Windows 上的共享 Codex App Server daemon 不在首版范围。
+macOS 继续使用 LaunchAgent 和 Unix Socket；Linux 核心代码可以手工运行，但在 systemd 安装器完成前不属于正式支持范围。
 同一个飞书 Bot 同时服务 Codex 与 Claude Code 时，两个项目必须启用 `binding_routing = true`；worker 会在 cc-connect
-启动或 Socket 重建后，从 SQLite 重放 binding，使每个动态创建的群只进入所属 Agent engine。
+启动或 `instance_id` 变化后，从 SQLite 重放 binding，使每个动态创建的群只进入所属 Agent engine。
 
 ## 架构
 
@@ -176,7 +232,7 @@ src/agent_chat_session_sync/
 ├── bridges/cc_connect.py    # 外部既有 Agent session attach
 ├── coordinator.py           # 映射生命周期和故障自愈
 ├── acceptance.py            # 真实 Codex ↔ 飞书验收编排
-├── installer.py             # Hook 与 worker 服务安装/卸载
+├── installer.py             # Hook、LaunchAgent / Task Scheduler 安装与卸载
 └── provenance.py            # 源码/构建包/Hook import 版本证明
 ```
 
@@ -184,12 +240,13 @@ src/agent_chat_session_sync/
 
 ## 前置条件
 
-1. Python 3.11 或更高版本。
-2. Codex Desktop/CLI 或 Claude Code 已能产生本地会话文件。
-3. `cc-connect v1.4.1` 已配置对应的 Codex/Claude Code + 飞书项目。
-4. 飞书应用具备建群、读群和发消息权限；正式 release 验收还需要 `im:chat:delete`（或 `im:chat`）用于自动解散测试群。
+1. Python 3.11–3.14。
+2. Windows Alpha 需要 Windows 11 x64、64 位 PowerShell 7 和 `uv`；macOS 使用现有 shell 安装入口。
+3. Codex Desktop/CLI 或 Claude Code 已能产生本地会话文件。
+4. `cc-connect v1.4.1` 已配置对应的 Codex/Claude Code + 飞书项目。
+5. 飞书应用具备建群、读群和发消息权限；正式 release 验收还需要 `im:chat:delete`（或 `im:chat`）用于自动解散测试群。
    `allow_from` 至少包含一个具体 `open_id`，不能只有 `*`。
-5. cc-connect 已应用本仓库的 `/sessions/bind-agent` 扩展。
+6. cc-connect 已应用本仓库的 `/sessions/bind-agent` 扩展。
 
 示例 `~/.cc-connect/config.toml`（只展示相关结构）：
 
@@ -197,7 +254,7 @@ src/agent_chat_session_sync/
 [[projects]]
 name = "local-codex"
 mode = "multi-workspace"
-base_dir = "/"
+base_dir = "/path/to/workspaces"
 workspace_init_allow_local_paths = true
 
 [projects.agent]
@@ -227,7 +284,7 @@ binding_routing = true
 [[projects]]
 name = "local-claude"
 mode = "multi-workspace"
-base_dir = "/"
+base_dir = "/path/to/workspaces"
 workspace_init_allow_local_paths = true
 
 [projects.agent]
@@ -247,9 +304,9 @@ group_reply_all = true
 binding_routing = true
 ```
 
-本地优先同步建议使用 cc-connect 的 `multi-workspace` 模式。若需要同步本机任意目录的新会话，
-将 `base_dir` 设为 `/`；Hook 会匹配所有绝对 cwd，
-attach 时把群持久绑定到实际会话 cwd，从而让同一个飞书 Bot 安全服务多个本地仓库。
+本地优先同步建议使用 cc-connect 的 `multi-workspace` 模式，并把 `base_dir` 限定在已有工作区根目录。
+`configure-windows --apply` 只在现有 `work_dir` 边界内补齐 multi-workspace，不会自动扩大到整个磁盘。
+Hook 会匹配边界内的绝对 cwd，attach 时把群持久绑定到实际会话 cwd。
 单工作区配置仍按 `work_dir` 匹配；多个覆盖目录嵌套时使用最具体的匹配项。
 
 ### Codex 权限 profile
@@ -271,8 +328,9 @@ enabled = false
 禁用时，会拒绝启动该远程会话；不会回退到 `danger-full-access`。配置了 `permission_profile` 后，协议层不会再同时发送
 legacy `sandbox` / `approvalPolicy` 覆盖值。
 
-Unix Socket 有两层含义：cc-connect 自己的 API Socket 负责 Hook attach；共享 App Server Socket 负责 daemon 生命周期。
-这两个 Socket 都必须由服务 UID 拥有，只允许 `0600`，或由明确服务组持有的 `0660`，并且父目录不能 world-writable。
+Local Endpoint 是 cc-connect 的本机控制边界：Unix 使用 owner-only Socket；Windows 使用 byte-mode Named Pipe。
+Windows Pipe DACL 只允许当前用户 SID、SYSTEM 和 Administrators，并拒绝 TCP/WS 或静默网络回退。
+Unix Socket 必须由服务 UID 拥有，只允许 `0600`，或由明确服务组持有的 `0660`，并且父目录不能 world-writable。
 Codex permission profile 内的 `network.unix_sockets` 则只控制 Agent 执行的沙箱命令是否能访问某个 Socket，
 不要用 `dangerously_allow_all_unix_sockets = true` 代替精确 allowlist。
 
@@ -301,18 +359,30 @@ permission_profile = "cc-connect-workspace"
 daemon 模式要求官方 managed standalone Codex 安装和正在运行的 App Server daemon。连接或 profile 验证失败时不会
 静默降级到 exec/rollout 路径。当前公开协议不能让第二个客户端接入 Desktop 私有 stdio 子进程；要让 Desktop UI 与飞书
 观察完全相同的进程内实时流，Desktop/CLI 也必须连接同一个公开 daemon。项目不依赖或逆向 Desktop 私有 IPC。
+Windows 11 x64 Alpha 不支持该共享 daemon 模式，只支持每会话 `stdio` lifecycle。
 
 ## 安装
 
-开发安装：
+开发安装优先使用项目锁定环境：
 
 ```bash
-python3 -m pip install -e .
-agent-chat-session-sync install-hooks
-agent-chat-session-sync doctor
+uv sync --extra dev
+uv run agent-chat-session-sync install-hooks
+uv run agent-chat-session-sync doctor
 ```
 
-macOS 普通用户安装可执行：
+Windows candidate 安装必须使用“快速开始”中的 wheel + EXE + 两项 SHA-256 完整参数。
+下面的无参数形式只用于 clean source checkout 的分组件开发部署，不验证或替换候选 artifact：
+
+```powershell
+pwsh -NoProfile -File .\scripts\install-windows.ps1 -WhatIf
+pwsh -NoProfile -File .\scripts\install-windows.ps1
+```
+
+Windows 安装器使用 `%LOCALAPPDATA%\agent-chat-session-sync\venv` 和
+`\AgentChatSessionSync\Worker` 当前用户 Task。卸载服务只移除经 identity 验证的本项目 Task 与 wrapper，默认保留 Hooks、数据库、日志和备份。
+
+macOS 普通用户安装：
 
 ```bash
 ./scripts/install.sh
@@ -329,13 +399,15 @@ macOS 普通用户安装可执行：
 
 | 变量 | 默认值 |
 |---|---|
-| `ACSS_DATA_DIR` | `~/.local/share/agent-chat-session-sync` |
+| `ACSS_DATA_DIR` | Windows: `%LOCALAPPDATA%\agent-chat-session-sync`; POSIX: `~/.local/share/agent-chat-session-sync` |
 | `CC_CONNECT_CONFIG` | `~/.cc-connect/config.toml` |
-| `CC_CONNECT_SOCKET` | `~/.cc-connect/run/api.sock` |
+| `CC_CONNECT_ENDPOINT` | Windows: SID-derived `npipe://./pipe/cc-connect-api-…`; POSIX: `unix://.../api.sock` |
+| `CC_CONNECT_SOCKET` | POSIX 兼容变量；Windows 不使用 |
 | `CODEX_HOME` | `~/.codex` |
 | `CLAUDE_HOME` | `~/.claude` |
 
-本机 data directory 权限会设为 `0700`，SQLite、日志、spool 和 worker lock 会设为 `0600`。
+POSIX data directory 使用 `0700`，SQLite、日志、spool 和 worker lock 使用 `0600`。
+Windows data directory 创建受保护 DACL，SQLite/WAL、日志、spool、锁和 service wrapper 继承该 ACL。
 `status` 不显示 chat ID 或用户 open ID：
 
 ```bash
@@ -358,22 +430,45 @@ agent-chat-session-sync uninstall-hooks
 ./scripts/build-cc-connect.sh
 ```
 
-脚本会克隆固定 revision、先执行 `git apply --check`、运行 core、Codex、Claude Code 和飞书 Go 测试，然后以
-`no_web goolm` tags 构建到 `dist/cc-connect`。它不会自动覆盖正在运行的 cc-connect；请先停止服务，备份原二进制，再显式部署构建产物。
+Windows x64 使用 PowerShell 7：
+
+```powershell
+pwsh -NoProfile -File .\scripts\build-cc-connect-windows.ps1 `
+  -Output .\dist\cc-connect-windows-x64.exe
+```
+
+两个脚本都会克隆固定 revision 并逐补丁执行 `git apply --check`。POSIX 入口运行 core/Codex/Claude/Feishu
+focused tests 后构建 `dist/cc-connect`；Windows 入口额外运行 full Go suite，使用 `-trimpath`，并把当前
+agent-chat-session-sync commit 与上游 revision 写入 `cc-connect-windows-x64.exe`。它们都不会自动覆盖正在运行的 cc-connect。
 
 正式 release 必须从 clean worktree 构建并附带校验和：
 
 ```bash
-python3 -m pip install build
-./scripts/build-release.sh
-shasum -a 256 -c dist/SHA256SUMS
+ACSS_WINDOWS_EXE=/path/to/cc-connect-windows-x64.exe ./scripts/build-release.sh
 ```
 
-release 包会验证 wheel 不含构建机绝对路径，并验证 sdist 包含 `patches/`、`scripts/` 和 `docs/`。
-GitHub Release 还提供经过同一 patch/test gate 构建的 macOS arm64 `cc-connect` 二进制；下载后应先用
-`SHA256SUMS` 校验，并显式 `chmod +x`。其他平台请从源码构建，不要使用架构不匹配的二进制。
+输出目录只允许四个文件：wheel、sdist、`cc-connect-windows-x64.exe` 和 `SHA256SUMS`。
+验证器检查候选 commit stamp、sdist 中的 PowerShell 安装器、EXE 的 PE/MZ 基本结构和精确 checksum 集合。
+这里的可复现含义是从固定 revision、lockfile、Go 版本和 patch 顺序可重建，不承诺跨机器 byte-for-byte 相同。
 
-扩展接口为本机 mode-0600 Unix Socket 上的：
+从匹配的 clean candidate checkout 执行完整 bundle/provenance 验证：
+
+```powershell
+$env:ACSS_EXPECTED_COMMIT = (git rev-parse HEAD)
+uv run --locked python .\scripts\verify-release-artifacts.py .\dist
+```
+
+Windows Alpha 二进制未进行 Authenticode 代码签名。下载后必须先验证 `SHA256SUMS`：
+
+```powershell
+Get-Content .\SHA256SUMS | ForEach-Object {
+    $expected, $name = $_ -split '  ', 2
+    $actual = (Get-FileHash -LiteralPath (Join-Path $PWD $name) -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) { throw "SHA-256 mismatch: $name" }
+}
+```
+
+扩展接口只存在于受权限保护的 Local Endpoint：Unix 为 mode-0600 Socket，Windows 为受限 Named Pipe。
 
 ```http
 POST /sessions/bind-agent
@@ -411,8 +506,8 @@ agent-chat-session-sync migrate-state \
 ## 开发与测试
 
 ```bash
-python3 -m pip install -e '.[dev]'
-python3 -m unittest discover -s tests
+uv sync --extra dev
+uv run python -m unittest discover -s tests
 ```
 
 Hook 遇到错误始终返回成功，避免阻断 Codex 回合；每次收件日志都包含
@@ -420,7 +515,6 @@ Hook 遇到错误始终返回成功，避免阻断 Codex 回合；每次收件�
 正式发布需要依次通过：
 
 ```bash
-./scripts/install.sh
 agent-chat-session-sync acceptance-live --agent codex --timeout 900
 agent-chat-session-sync acceptance-live --agent claudecode --timeout 900
 ```
@@ -432,8 +526,8 @@ agent-chat-session-sync acceptance-live --agent claudecode --timeout 900
 ## 安全边界
 
 - 不提交 `~/.cc-connect/config.toml`、`state.json`、日志、token 或 `app_secret`。
-- attach API 只应暴露在 cc-connect 权限为 `0600` 的本机 Unix Socket 上。
-- permission profile 与 Socket ACL 是独立安全边界：前者约束 Agent 命令，后者约束哪个部署身份能连接服务。
+- attach API 只应暴露在本机 Local Endpoint：Unix owner-only Socket 或 Windows 受限 Named Pipe；禁止 TCP reverse proxy。
+- permission profile 与 Local Endpoint ACL 是独立安全边界：前者约束 Agent 命令，后者约束哪个部署身份能连接服务。
 - App Server daemon 模式只连接公开的 Codex control socket，不连接 Desktop 私有 IPC。
 - 项目匹配和 `SessionIDValidator` 共同防止跨项目恢复错误会话。
 - 本项目当前使用 `allow_from` 的第一个具体用户作为群主和成员；多用户选主策略属于后续功能。
