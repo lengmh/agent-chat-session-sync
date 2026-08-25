@@ -1,0 +1,1176 @@
+diff --git a/agent/claudecode/session_test.go b/agent/claudecode/session_test.go
+index 137788c1b1c9e49b33266f7bedc9e7d05a3bab7d..0cd5308da600745b43637d036b595cc8db297c86 100644
+--- a/agent/claudecode/session_test.go
++++ b/agent/claudecode/session_test.go
+@@ -7,6 +7,7 @@ import (
+ 	"os"
+ 	"os/exec"
+ 	"path/filepath"
++	"runtime"
+ 	"strings"
+ 	"testing"
+ 	"time"
+@@ -589,6 +590,9 @@ func TestWriteTempAppendPromptFile_UniquePerCall(t *testing.T) {
+ // access path the spawned agent uses when it calls os.Open on the
+ // file path passed via --append-system-prompt-file.
+ func TestWriteTempAppendPromptFile_ReadableByOtherUser(t *testing.T) {
++	if runtime.GOOS == "windows" {
++		t.Skip("POSIX mode bits do not represent Windows file access")
++	}
+ 	dir := t.TempDir()
+ 	path, err := writeTempAppendPromptFile(dir, "session X")
+ 	if err != nil {
+@@ -631,9 +635,9 @@ func makeFiller(n int) string {
+ // assistant text reaches the user.
+ //
+ // Cases covered:
+-//  - string content (plain text result)
+-//  - array content (Anthropic SDK multi-block: [{type:"text", text:"..."}])
+-//  - is_error=true (exit code 1, success=false)
++//   - string content (plain text result)
++//   - array content (Anthropic SDK multi-block: [{type:"text", text:"..."}])
++//   - is_error=true (exit code 1, success=false)
+ func TestHandleUserEmitsToolResult(t *testing.T) {
+ 	cases := []struct {
+ 		name        string
+@@ -649,10 +653,10 @@ func TestHandleUserEmitsToolResult(t *testing.T) {
+ 				"message": map[string]any{
+ 					"content": []any{
+ 						map[string]any{
+-							"type":          "tool_result",
+-							"tool_use_id":   "toolu_abc",
+-							"is_error":      false,
+-							"content":       "command output here",
++							"type":        "tool_result",
++							"tool_use_id": "toolu_abc",
++							"is_error":    false,
++							"content":     "command output here",
+ 						},
+ 					},
+ 				},
+diff --git a/agent/claudecode/skilldirs_test.go b/agent/claudecode/skilldirs_test.go
+index 5c6127101f7b9b45612fa7b191ea7b3bba43388b..81f097bb3cb70a5741ce0b68ce75a8645e867fbb 100644
+--- a/agent/claudecode/skilldirs_test.go
++++ b/agent/claudecode/skilldirs_test.go
+@@ -14,6 +14,7 @@ func TestSkillDirs_UsesClaudeConfigDirAndProjectParents(t *testing.T) {
+ 	workDir := filepath.Join(repo, "nested", "pkg")
+ 
+ 	t.Setenv("HOME", home)
++	t.Setenv("USERPROFILE", home)
+ 	t.Setenv("CLAUDE_CONFIG_DIR", configHome)
+ 
+ 	for _, dir := range []string{
+@@ -56,6 +57,7 @@ func TestSkillDirs_FallsBackToHomeClaudeDir(t *testing.T) {
+ 		t.Fatalf("mkdir workdir: %v", err)
+ 	}
+ 	t.Setenv("HOME", home)
++	t.Setenv("USERPROFILE", home)
+ 	t.Setenv("CLAUDE_CONFIG_DIR", "")
+ 
+ 	a := &Agent{workDir: workDir}
+diff --git a/agent/cursor/cursor_chats_test.go b/agent/cursor/cursor_chats_test.go
+index 3ba765dbfba67ae14c698cf838a75fe8787c5b83..67048682d4b824080cf416f24a0496d479698f21 100644
+--- a/agent/cursor/cursor_chats_test.go
++++ b/agent/cursor/cursor_chats_test.go
+@@ -30,6 +30,7 @@ func TestCursorChatsBaseDirs_XDGAndLegacy(t *testing.T) {
+ func TestListCursorSessions_ConfigCursorPath(t *testing.T) {
+ 	home := t.TempDir()
+ 	t.Setenv("HOME", home)
++	t.Setenv("USERPROFILE", home)
+ 	t.Setenv("XDG_CONFIG_HOME", "")
+ 
+ 	workDir := filepath.Join(home, "project")
+diff --git a/agent/cursor/skilldirs_test.go b/agent/cursor/skilldirs_test.go
+index 3806fafc9e612ba1f98b826052e30696ec3e959c..72c140bdc7ef14b2ba424cac254ec903b553b923 100644
+--- a/agent/cursor/skilldirs_test.go
++++ b/agent/cursor/skilldirs_test.go
+@@ -11,6 +11,7 @@ func TestSkillDirs_IncludesCursorAndClaudePaths(t *testing.T) {
+ 	workDir := filepath.Join(tmp, "workspace")
+ 
+ 	t.Setenv("HOME", home)
++	t.Setenv("USERPROFILE", home)
+ 
+ 	a := &Agent{workDir: workDir}
+ 	got := a.SkillDirs()
+@@ -36,6 +37,7 @@ func TestSkillDirs_CursorBeforeClaude(t *testing.T) {
+ 	workDir := filepath.Join(tmp, "workspace")
+ 
+ 	t.Setenv("HOME", home)
++	t.Setenv("USERPROFILE", home)
+ 
+ 	a := &Agent{workDir: workDir}
+ 	got := a.SkillDirs()
+diff --git a/agent/iflow/session_test.go b/agent/iflow/session_test.go
+index 87ce2bc842f5faff61997ed2d4ca391d14241088..4a03d4b27e95dac863588c80783af3db6823449b 100644
+--- a/agent/iflow/session_test.go
++++ b/agent/iflow/session_test.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"os"
+ 	"path/filepath"
++	"runtime"
+ 	"strings"
+ 	"sync/atomic"
+ 	"testing"
+@@ -359,6 +360,9 @@ func TestIFlowSessionDefaultToolTimeout(t *testing.T) {
+ }
+ 
+ func TestIFlowSessionPendingToolTimeoutClearsBusyState(t *testing.T) {
++	if runtime.GOOS == "windows" {
++		t.Skip("requires a Unix PTY and POSIX shell fixture")
++	}
+ 	oldTimeout := iflowPendingToolTimeout
+ 	oldDefaultTimeout := iflowPendingToolTimeoutDefaultMode
+ 	iflowPendingToolTimeout = 80 * time.Millisecond
+diff --git a/agent/kimi/kimi_test.go b/agent/kimi/kimi_test.go
+index 4164c4e9ea5086659c8fb7876e9db6e882f181ad..4b881ff4b9a42343382b06ccadc635e917af93d0 100644
+--- a/agent/kimi/kimi_test.go
++++ b/agent/kimi/kimi_test.go
+@@ -2,7 +2,9 @@ package kimi
+ 
+ import (
+ 	"context"
++	"os"
+ 	"os/exec"
++	"path/filepath"
+ 	"testing"
+ 	"time"
+ 
+@@ -144,15 +146,18 @@ func TestAgentStartSession(t *testing.T) {
+ }
+ 
+ func TestAgentMemoryAndSkill(t *testing.T) {
+-	a := &Agent{workDir: "/tmp/my-project", activeIdx: -1}
++	workDir := filepath.Join(t.TempDir(), "my-project")
++	a := &Agent{workDir: workDir, activeIdx: -1}
+ 
+-	assert.Equal(t, "/tmp/my-project/AGENTS.md", a.ProjectMemoryFile())
++	assert.Equal(t, filepath.Join(workDir, "AGENTS.md"), a.ProjectMemoryFile())
+ 	assert.NotEmpty(t, a.GlobalMemoryFile())
+ 
+ 	skillDirs := a.SkillDirs()
+ 	require.Len(t, skillDirs, 2)
+-	assert.Contains(t, skillDirs[0], ".kimi/skills")
+-	assert.Contains(t, skillDirs[1], ".kimi/skills")
++	assert.Equal(t, filepath.Join(workDir, ".kimi", "skills"), skillDirs[0])
++	home, err := os.UserHomeDir()
++	require.NoError(t, err)
++	assert.Equal(t, filepath.Join(home, ".kimi", "skills"), skillDirs[1])
+ }
+ 
+ func TestAgentAvailableModels(t *testing.T) {
+diff --git a/agent/opencode/opencode_model_test.go b/agent/opencode/opencode_model_test.go
+index 3a31b9192f2a17628adf76a696f4394cbf0c3d62..57f01161446cf54c7ac1ff4f75e5699ab5db7d33 100644
+--- a/agent/opencode/opencode_model_test.go
++++ b/agent/opencode/opencode_model_test.go
+@@ -7,6 +7,7 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"path/filepath"
++	"runtime"
+ 	"sort"
+ 	"strings"
+ 	"testing"
+@@ -21,11 +22,19 @@ func (errWriter) Write(_ []byte) (int, error) {
+ 	return 0, errors.New("write failed")
+ }
+ 
++func skipWindowsShellFixture(t *testing.T) {
++	t.Helper()
++	if runtime.GOOS == "windows" {
++		t.Skip("fake opencode CLI requires a POSIX shell")
++	}
++}
++
+ // writeFakeModelsBin writes a temporary shell script that acts as a fake CLI.
+ // When invoked with "models", it prints lines to stdout.
+ // When exitCode != 0, the script exits immediately with that code.
+ func writeFakeModelsBin(t *testing.T, lines []string, exitCode int) string {
+ 	t.Helper()
++	skipWindowsShellFixture(t)
+ 	tmpDir := t.TempDir()
+ 	name := filepath.Join(tmpDir, "fake-opencode")
+ 
+@@ -112,6 +121,7 @@ func writePersistentModelCacheWithSnapshot(t *testing.T, cachePath string, snaps
+ 
+ func writeBlockingModelsBin(t *testing.T, gatePath string, lines []string) string {
+ 	t.Helper()
++	skipWindowsShellFixture(t)
+ 	tmpDir := t.TempDir()
+ 	name := filepath.Join(tmpDir, "fake-opencode")
+ 
+@@ -136,6 +146,7 @@ func writeBlockingModelsBin(t *testing.T, gatePath string, lines []string) strin
+ 
+ func writeCountingModelsBin(t *testing.T, countPath, gatePath string, lines []string, requireEnvKey string, exitCode int) string {
+ 	t.Helper()
++	skipWindowsShellFixture(t)
+ 	tmpDir := t.TempDir()
+ 	name := filepath.Join(tmpDir, "fake-opencode")
+ 
+@@ -547,6 +558,7 @@ func TestAvailableModels_ConfiguredFallbackUsesSnapshot(t *testing.T) {
+ // TestAvailableModels_CustomCmdUsedForDiscovery verifies that a.cmd (not the
+ // literal string "opencode") is used when running the models sub-command.
+ func TestAvailableModels_CustomCmdUsedForDiscovery(t *testing.T) {
++	skipWindowsShellFixture(t)
+ 	tmpDir := t.TempDir()
+ 	customBin := filepath.Join(tmpDir, "my-ai-cli")
+ 	script := "#!/bin/sh\nif [ \"$1\" = \"models\" ]; then\nprintf '%s\\n' 'custom/model-a'\nfi\n"
+@@ -1176,6 +1188,7 @@ func TestAvailableModels_IgnoresPersistentCacheForWorkDirMismatch(t *testing.T)
+ // If wantID is non-empty the script validates the session ID matches.
+ func writeFakeDeleteBin(t *testing.T, wantID string, exitCode int, stderr string) string {
+ 	t.Helper()
++	skipWindowsShellFixture(t)
+ 	tmpDir := t.TempDir()
+ 	name := filepath.Join(tmpDir, "fake-opencode")
+ 
+diff --git a/agent/pi/pi.go b/agent/pi/pi.go
+index 7382b21791c916e2778d29131cdfb5b5376a50f2..f9268c6b71b2702b2bfc171aa220f50ff2c156fd 100644
+--- a/agent/pi/pi.go
++++ b/agent/pi/pi.go
+@@ -372,9 +372,9 @@ func settingsPath() string {
+ 
+ // piSettings represents the structure of pi's settings.json relevant fields.
+ type piSettings struct {
+-	EnabledModels  []string `json:"enabledModels"`
+-	DefaultModel   string   `json:"defaultModel"`
+-	DefaultProvider string  `json:"defaultProvider"`
++	EnabledModels   []string `json:"enabledModels"`
++	DefaultModel    string   `json:"defaultModel"`
++	DefaultProvider string   `json:"defaultProvider"`
+ }
+ 
+ // readSettings reads and parses pi's settings.json.
+@@ -458,6 +458,9 @@ func findSessionFile(sessDir, sessionID string) string {
+ // Pi encodes the absolute path as: replace "/" with "-", wrap with "--".
+ // e.g. /home/user/project → --home-user-project--
+ func piSessionDir(workDir string) string {
++	if strings.TrimSpace(workDir) == "" {
++		return ""
++	}
+ 	homeDir, err := os.UserHomeDir()
+ 	if err != nil {
+ 		return ""
+@@ -466,7 +469,9 @@ func piSessionDir(workDir string) string {
+ 	if err != nil {
+ 		return ""
+ 	}
+-	encoded := "--" + strings.ReplaceAll(strings.TrimPrefix(absDir, "/"), "/", "-") + "--"
++	normalized := filepath.ToSlash(absDir)
++	encodedPath := strings.NewReplacer("/", "-", ":", "-").Replace(strings.TrimLeft(normalized, "/"))
++	encoded := "--" + encodedPath + "--"
+ 	return filepath.Join(homeDir, ".pi", "agent", "sessions", encoded)
+ }
+ 
+diff --git a/agent/pi/pi_test.go b/agent/pi/pi_test.go
+index d1550fb4baf2242a9f71c07e4edfa949f7c2d4b9..0e3204c24d27322e0679711bac180fa09c5baaf6 100644
+--- a/agent/pi/pi_test.go
++++ b/agent/pi/pi_test.go
+@@ -206,7 +206,7 @@ func TestReadSettingsModels(t *testing.T) {
+ 			"provider-a/family-a/model-beta",
+ 			"provider-b/family-b/model-gamma",
+ 		},
+-		"defaultModel":  "family-a/model-beta",
++		"defaultModel":    "family-a/model-beta",
+ 		"defaultProvider": "provider-a",
+ 	}
+ 	data, _ := json.Marshal(settings)
+@@ -329,8 +329,9 @@ func TestSettingsPath(t *testing.T) {
+ 	}()
+ 
+ 	t.Setenv("PI_CODING_AGENT_DIR", "/custom")
+-	if p := settingsPath(); p != "/custom/settings.json" {
+-		t.Errorf("settingsPath() = %q, want /custom/settings.json", p)
++	want := filepath.Join("/custom", "settings.json")
++	if p := settingsPath(); p != want {
++		t.Errorf("settingsPath() = %q, want %q", p, want)
+ 	}
+ }
+ 
+@@ -345,7 +346,10 @@ func TestAgent_SetSessionEnv(t *testing.T) {
+ }
+ 
+ func TestAgent_ListSessions(t *testing.T) {
+-	a := &Agent{}
++	home := t.TempDir()
++	t.Setenv("HOME", home)
++	t.Setenv("USERPROFILE", home)
++	a := &Agent{workDir: t.TempDir()}
+ 	sessions, err := a.ListSessions(context.Background())
+ 	if err != nil {
+ 		t.Errorf("ListSessions() error = %v", err)
+diff --git a/agent/pi/session.go b/agent/pi/session.go
+index 9a2d26594964e3a6a77a931fc2ff78acf1e4ae2b..b7fad61491927f7fdb6b740bbbae938728781d18 100644
+--- a/agent/pi/session.go
++++ b/agent/pi/session.go
+@@ -53,6 +53,8 @@ type piSession struct {
+ 	lastUsage *core.ContextUsage
+ }
+ 
++var piAttachmentSequence atomic.Uint64
++
+ func newPiSession(ctx context.Context, cmd string, extraArgs []string, workDir, model, mode, thinking, resumeID string, extraEnv []string) (*piSession, error) {
+ 	sessionCtx, cancel := context.WithCancel(ctx)
+ 
+@@ -65,7 +67,7 @@ func newPiSession(ctx context.Context, cmd string, extraArgs []string, workDir,
+ 		thinking:  thinking,
+ 		extraEnv:  extraEnv,
+ 		attachDir: filepath.Join(workDir, ".cc-connect", "attachments",
+-			fmt.Sprintf("pi_%d", time.Now().UnixNano())),
++			fmt.Sprintf("pi_%d_%d", time.Now().UnixNano(), piAttachmentSequence.Add(1))),
+ 		events:   make(chan core.Event, 64),
+ 		ctx:      sessionCtx,
+ 		cancel:   cancel,
+diff --git a/cmd/cc-connect/daemon_test.go b/cmd/cc-connect/daemon_test.go
+index a310a7fdf7fb02793b226e19b06f1f848e35c8df..c1cf747f2b60d88b11e55d5d757d1f0f08456b4d 100644
+--- a/cmd/cc-connect/daemon_test.go
++++ b/cmd/cc-connect/daemon_test.go
+@@ -101,9 +101,11 @@ func TestParseDaemonInstallArgs_NoCaptureSecretsFlagAndEnvCombine(t *testing.T)
+ }
+ 
+ func TestParseDaemonInstallArgs_WorkDirOverridesConfig(t *testing.T) {
++	root := t.TempDir()
++	workDir := filepath.Join(root, "override")
+ 	cfg, force, err := parseDaemonInstallArgs([]string{
+-		"--config", "/tmp/example/config.toml",
+-		"--work-dir", "/tmp/override",
++		"--config", filepath.Join(root, "example", "config.toml"),
++		"--work-dir", workDir,
+ 		"--force",
+ 	})
+ 	if err != nil {
+@@ -113,8 +115,7 @@ func TestParseDaemonInstallArgs_WorkDirOverridesConfig(t *testing.T) {
+ 		t.Fatalf("force = false, want true")
+ 	}
+ 
+-	want := filepath.Clean("/tmp/override")
+-	if cfg.WorkDir != want {
+-		t.Fatalf("cfg.WorkDir = %q, want %q", cfg.WorkDir, want)
++	if cfg.WorkDir != workDir {
++		t.Fatalf("cfg.WorkDir = %q, want %q", cfg.WorkDir, workDir)
+ 	}
+ }
+diff --git a/cmd/cc-connect/doctor_runas_test.go b/cmd/cc-connect/doctor_runas_test.go
+index 1c4e6faeed9cb327d166f2e4410f43aae2158d50..e03960e9cee821fbf6d7498016134a3ce6532b11 100644
+--- a/cmd/cc-connect/doctor_runas_test.go
++++ b/cmd/cc-connect/doctor_runas_test.go
+@@ -1,3 +1,5 @@
++//go:build !windows
++
+ package main
+ 
+ import (
+diff --git a/cmd/cc-connect/internal_api_server.go b/cmd/cc-connect/internal_api_server.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..26bb62f02e02c0fb3f0e7e3fafd97a5f99d9c17f
+--- /dev/null
++++ b/cmd/cc-connect/internal_api_server.go
+@@ -0,0 +1,10 @@
++package main
++
++import (
++	"github.com/chenhg5/cc-connect/config"
++	"github.com/chenhg5/cc-connect/core"
++)
++
++func newInternalAPIServer(cfg *config.Config) (*core.APIServer, error) {
++	return core.NewAPIServerWithEndpoint(cfg.DataDir, cfg.InternalAPIEndpoint)
++}
+diff --git a/cmd/cc-connect/main.go b/cmd/cc-connect/main.go
+index b0b4d26f211e2a16827aebc548a3c32bb42cd2a8..1a75994088b1dba3841b3a31d19354e91ef2be49 100644
+--- a/cmd/cc-connect/main.go
++++ b/cmd/cc-connect/main.go
+@@ -1260,7 +1260,7 @@ func main() {
+ 	}
+ 
+ 	// Start internal API server for CLI send
+-	apiSrv, err := core.NewAPIServer(cfg.DataDir)
++	apiSrv, err := newInternalAPIServer(cfg)
+ 	if err != nil {
+ 		slog.Warn("api server unavailable", "error", err)
+ 	} else {
+diff --git a/cmd/cc-connect/main_windows_test.go b/cmd/cc-connect/main_windows_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..bf0ed0a1a4282f58ba73544e60599c74d2ed560e
+--- /dev/null
++++ b/cmd/cc-connect/main_windows_test.go
+@@ -0,0 +1,28 @@
++//go:build windows
++
++package main
++
++import (
++	"fmt"
++	"os"
++	"testing"
++
++	"github.com/chenhg5/cc-connect/config"
++)
++
++func TestNewInternalAPIServerUsesConfiguredEndpoint(t *testing.T) {
++	pipeName := fmt.Sprintf("cc-connect-main-test-%d", os.Getpid())
++	cfg := &config.Config{
++		DataDir:             t.TempDir(),
++		InternalAPIEndpoint: "npipe://./pipe/" + pipeName,
++	}
++
++	api, err := newInternalAPIServer(cfg)
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(api.Stop)
++	if got, want := api.SocketPath(), `\\.\pipe\`+pipeName; got != want {
++		t.Fatalf("SocketPath() = %q, want %q", got, want)
++	}
++}
+diff --git a/config.example.toml b/config.example.toml
+index cc57caf056fca7d9e5a6cb1fe61426424196efc0..9fef77d18e80cd08df12e63a911bc4187613d178 100644
+--- a/config.example.toml
++++ b/config.example.toml
+@@ -39,6 +39,14 @@
+ # 会话数据存储目录（默认 ~/.cc-connect），以 JSON 文件保存对话历史和会话状态。
+ # data_dir = "/path/to/custom/dir"
+ 
++# Local endpoint for cc-connect's internal HTTP API.
++# Leave unset to use the platform default: a mode-0600 Unix socket on Unix,
++# or a current-user restricted Named Pipe on Windows.
++# cc-connect 内部 HTTP API 的本地端点。留空时使用平台安全默认值：
++# Unix 使用权限为 0600 的 Unix Socket，Windows 使用仅当前用户可访问的命名管道。
++# internal_api_endpoint = "unix:///path/to/api.sock"
++# internal_api_endpoint = "npipe://./pipe/cc-connect-api-<sid-hash>"
++
+ # Attachment send-back switch for `cc-connect send --image/--file`.
+ # Independent from the agent's /mode. Set to "off" to block IM image/file send-back.
+ # `cc-connect send --message` without attachments is unaffected.
+diff --git a/config/config.go b/config/config.go
+index 48dc6b9d9cd065562d61e7a3958d520a113d9d80..6d08ea6c31134e0b19f26e04a8832492e521d1eb 100644
+--- a/config/config.go
++++ b/config/config.go
+@@ -84,8 +84,9 @@ var configMu sync.Mutex
+ var ConfigPath string
+ 
+ type Config struct {
+-	DataDir        string `toml:"data_dir"` // session store directory, default ~/.cc-connect
+-	AttachmentSend string `toml:"attachment_send"`
++	DataDir             string `toml:"data_dir"` // session store directory, default ~/.cc-connect
++	InternalAPIEndpoint string `toml:"internal_api_endpoint,omitempty"`
++	AttachmentSend      string `toml:"attachment_send"`
+ 	// Quiet is legacy: when true and [display] does not set thinking_messages / tool_messages,
+ 	// engines behave as if those flags were false. Per-project quiet overrides when set.
+ 	Quiet              *bool                   `toml:"quiet,omitempty"`
+@@ -997,6 +998,15 @@ func (c *Config) validateInternal(permissive bool) error {
+ 	if err := validateDisplayConfig("display", &c.Display); err != nil {
+ 		return err
+ 	}
++	if endpoint := strings.TrimSpace(c.InternalAPIEndpoint); endpoint != "" {
++		scheme, address, found := strings.Cut(endpoint, "://")
++		if !found || strings.TrimSpace(address) == "" {
++			return fmt.Errorf("config: internal_api_endpoint requires a local endpoint address")
++		}
++		if scheme != "unix" && scheme != "npipe" {
++			return fmt.Errorf("config: internal_api_endpoint must use unix:// or npipe://")
++		}
++	}
+ 	switch strings.ToLower(strings.TrimSpace(c.AttachmentSend)) {
+ 	case "", "on", "off":
+ 	default:
+diff --git a/config/config_test.go b/config/config_test.go
+index 5ad3f53886ea91e5a7e4f8a5e424a3e84626bb7b..c54a4202a869583b0537e51f6ef8cbe6bbec44d2 100644
+--- a/config/config_test.go
++++ b/config/config_test.go
+@@ -526,6 +526,7 @@ func TestValidateProjectDisplayConfig(t *testing.T) {
+ func TestLoad_DefaultsDataDir(t *testing.T) {
+ 	dir := t.TempDir()
+ 	t.Setenv("HOME", dir)
++	t.Setenv("USERPROFILE", dir)
+ 
+ 	cfgPath := filepath.Join(dir, "config.toml")
+ 	if err := os.WriteFile(cfgPath, []byte(baseConfigTOML), 0o644); err != nil {
+@@ -543,6 +544,44 @@ func TestLoad_DefaultsDataDir(t *testing.T) {
+ 	}
+ }
+ 
++func TestLoad_ParsesInternalAPIEndpoint(t *testing.T) {
++	dir := t.TempDir()
++	configPath := filepath.Join(dir, "config.toml")
++	content := "internal_api_endpoint = \"npipe://./pipe/cc-connect-test\"\n" + baseConfigTOML
++	if err := os.WriteFile(configPath, []byte(content), 0o600); err != nil {
++		t.Fatal(err)
++	}
++
++	cfg, err := Load(configPath)
++	if err != nil {
++		t.Fatalf("Load() error: %v", err)
++	}
++	if got, want := cfg.InternalAPIEndpoint, "npipe://./pipe/cc-connect-test"; got != want {
++		t.Fatalf("InternalAPIEndpoint = %q, want %q", got, want)
++	}
++}
++
++func TestLoad_RejectsNetworkInternalAPIEndpoint(t *testing.T) {
++	for _, endpoint := range []string{
++		"tcp://127.0.0.1:9810",
++		"ws://127.0.0.1:9810",
++	} {
++		t.Run(endpoint, func(t *testing.T) {
++			configPath := writeConfigFixture(
++				t,
++				"internal_api_endpoint = \""+endpoint+"\"\n"+baseConfigTOML,
++			)
++			_, err := Load(configPath)
++			if err == nil {
++				t.Fatalf("endpoint %q was accepted", endpoint)
++			}
++			if !strings.Contains(err.Error(), "internal_api_endpoint") {
++				t.Fatalf("error = %v", err)
++			}
++		})
++	}
++}
++
+ func TestLoad_ResolvesEnvPlaceholders(t *testing.T) {
+ 
+ 	root := t.TempDir()
+@@ -590,14 +629,14 @@ func TestLoad_ResolvesEnvPlaceholders(t *testing.T) {
+ 		t.Fatalf("Load() error: %v", err)
+ 	}
+ 
+-	if got, want := cfg.DataDir, filepath.Join(root, "state"); got != want {
++	if got, want := cfg.DataDir, root+"/state"; got != want {
+ 		t.Fatalf("DataDir = %q, want %q", got, want)
+ 	}
+ 	if got := cfg.Webhook.Token; got != "hook-secret" {
+ 		t.Fatalf("Webhook.Token = %q, want hook-secret", got)
+ 	}
+-	if got := stringMapValue(cfg.Projects[0].Agent.Options, "work_dir"); got != filepath.Join(root, "repo") {
+-		t.Fatalf("work_dir = %q, want %q", got, filepath.Join(root, "repo"))
++	if got, want := stringMapValue(cfg.Projects[0].Agent.Options, "work_dir"), root+"/repo"; got != want {
++		t.Fatalf("work_dir = %q, want %q", got, want)
+ 	}
+ 	if got := stringMapValue(cfg.Projects[0].Agent.Options, "note"); got != "prefix-hook-secret-suffix" {
+ 		t.Fatalf("note = %q, want prefix-hook-secret-suffix", got)
+diff --git a/core/api.go b/core/api.go
+index 12cbc53af1d95c099f46f2f6eb6f970ad41cd5d2..69f69a36d3d6099fa1ec1e80e1457d8368345338 100644
+--- a/core/api.go
++++ b/core/api.go
+@@ -1,6 +1,8 @@
+ package core
+ 
+ import (
++	"crypto/rand"
++	"encoding/hex"
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
+@@ -20,10 +22,12 @@ import (
+ // is unset. Exported so cmd/cc-connect can resolve the same default.
+ const DefaultMaxAttachmentSize int64 = 50 << 20
+ 
+-// APIServer exposes a local Unix socket API for external tools (e.g. cron jobs)
+-// to send messages to active sessions.
++// APIServer exposes a local API for external tools (e.g. cron jobs) to send
++// messages to active sessions.
+ type APIServer struct {
+ 	socketPath string
++	transport  string
++	instanceID string
+ 	listener   net.Listener
+ 	server     *http.Server
+ 	mux        *http.ServeMux
+@@ -62,28 +66,38 @@ type SendRequest struct {
+ 	AtAll      bool              `json:"at_all,omitempty"`
+ }
+ 
+-// NewAPIServer creates an API server on a Unix socket.
++// NewAPIServer creates an API server on the platform's default local endpoint.
+ func NewAPIServer(dataDir string) (*APIServer, error) {
+-	sockDir := filepath.Join(dataDir, "run")
+-	if err := os.MkdirAll(sockDir, 0o755); err != nil {
+-		return nil, fmt.Errorf("create run dir: %w", err)
+-	}
+-	sockPath := filepath.Join(sockDir, "api.sock")
+-
+-	// Remove stale socket
+-	os.Remove(sockPath)
++	return NewAPIServerWithEndpoint(dataDir, "")
++}
+ 
+-	listener, err := net.Listen("unix", sockPath)
++// NewAPIServerWithEndpoint creates an API server on an explicit local endpoint.
++func NewAPIServerWithEndpoint(dataDir, endpoint string) (*APIServer, error) {
++	value := strings.TrimSpace(endpoint)
++	if value != "" {
++		scheme, address, found := strings.Cut(value, "://")
++		if !found || strings.TrimSpace(address) == "" {
++			return nil, fmt.Errorf("local endpoint address is required")
++		}
++		if scheme != "unix" && scheme != "npipe" {
++			return nil, fmt.Errorf("unsupported local endpoint transport: %s", scheme)
++		}
++	}
++	socketPath, transport, listener, err := newLocalAPIListener(dataDir, value)
+ 	if err != nil {
+-		return nil, fmt.Errorf("listen unix socket: %w", err)
++		return nil, err
+ 	}
+-	if err := os.Chmod(sockPath, 0o600); err != nil {
++	instanceID, err := newProcessInstanceID()
++	if err != nil {
+ 		_ = listener.Close()
+-		return nil, fmt.Errorf("chmod socket: %w", err)
++		_ = removeLocalAPIEndpoint(socketPath)
++		return nil, fmt.Errorf("create API instance ID: %w", err)
+ 	}
+ 
+ 	s := &APIServer{
+-		socketPath:         sockPath,
++		socketPath:         socketPath,
++		transport:          transport,
++		instanceID:         instanceID,
+ 		listener:           listener,
+ 		mux:                http.NewServeMux(),
+ 		engines:            make(map[string]*Engine),
+@@ -114,6 +128,14 @@ func (s *APIServer) SocketPath() string {
+ 	return s.socketPath
+ }
+ 
++func newProcessInstanceID() (string, error) {
++	var id [16]byte
++	if _, err := rand.Read(id[:]); err != nil {
++		return "", err
++	}
++	return hex.EncodeToString(id[:]), nil
++}
++
+ func (s *APIServer) RegisterEngine(name string, e *Engine) {
+ 	s.mu.Lock()
+ 	defer s.mu.Unlock()
+@@ -187,9 +209,13 @@ func (s *APIServer) Stop() {
+ 		if err := s.server.Close(); err != nil && err != http.ErrServerClosed {
+ 			slog.Debug("api server close failed", "error", err)
+ 		}
++	} else if s.listener != nil {
++		if err := s.listener.Close(); err != nil {
++			slog.Debug("api listener close failed", "error", err)
++		}
+ 	}
+-	if err := os.Remove(s.socketPath); err != nil && !os.IsNotExist(err) {
+-		slog.Debug("api server remove socket failed", "error", err)
++	if err := removeLocalAPIEndpoint(s.socketPath); err != nil {
++		slog.Debug("api server remove local endpoint failed", "error", err)
+ 	}
+ }
+ 
+@@ -314,7 +340,7 @@ func (s *APIServer) handleSessions(w http.ResponseWriter, r *http.Request) {
+ 
+ // BindAgentSessionRequest binds a platform conversation directly to an
+ // existing native agent session. This is intentionally local-only: APIServer
+-// listens on a mode-0600 Unix socket.
++// listens on a permission-protected local endpoint.
+ type BindAgentSessionRequest struct {
+ 	Project     string `json:"project"`
+ 	SessionKey  string `json:"session_key"`
+@@ -325,7 +351,11 @@ type BindAgentSessionRequest struct {
+ 
+ func (s *APIServer) handleBindAgentSession(w http.ResponseWriter, r *http.Request) {
+ 	if r.Method == http.MethodGet {
+-		apiJSON(w, http.StatusOK, map[string]any{"capabilities": []string{"attach_agent_session", "binding_routing", "external_session_refresh"}})
++		apiJSON(w, http.StatusOK, map[string]any{
++			"capabilities": []string{"attach_agent_session", "binding_routing", "external_session_refresh", "local_endpoint_v2"},
++			"transport":    s.transport,
++			"instance_id":  s.instanceID,
++		})
+ 		return
+ 	}
+ 	if r.Method != http.MethodPost {
+diff --git a/core/api_test.go b/core/api_test.go
+index 31ad6fd94a986e8adcb8526219e941449ed6da40..8551e039ec2db2b88ec61c82d6a095221a2dfe98 100644
+--- a/core/api_test.go
++++ b/core/api_test.go
+@@ -181,7 +181,7 @@ func TestHandleBindAgentSession(t *testing.T) {
+ }
+ 
+ func TestHandleBindAgentSessionReportsExternalRefreshCapability(t *testing.T) {
+-	api := &APIServer{}
++	api := &APIServer{transport: "npipe", instanceID: "instance-1"}
+ 	rec := httptest.NewRecorder()
+ 	api.handleBindAgentSession(rec, httptest.NewRequest(http.MethodGet, "/sessions/bind-agent", nil))
+ 	if rec.Code != http.StatusOK {
+@@ -189,6 +189,8 @@ func TestHandleBindAgentSessionReportsExternalRefreshCapability(t *testing.T) {
+ 	}
+ 	var payload struct {
+ 		Capabilities []string `json:"capabilities"`
++		Transport    string   `json:"transport"`
++		InstanceID   string   `json:"instance_id"`
+ 	}
+ 	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+ 		t.Fatal(err)
+@@ -202,6 +204,33 @@ func TestHandleBindAgentSessionReportsExternalRefreshCapability(t *testing.T) {
+ 	if !found {
+ 		t.Fatalf("capabilities = %#v, want external_session_refresh", payload.Capabilities)
+ 	}
++	localEndpointV2 := false
++	for _, capability := range payload.Capabilities {
++		if capability == "local_endpoint_v2" {
++			localEndpointV2 = true
++		}
++	}
++	if !localEndpointV2 {
++		t.Fatalf("capabilities = %#v, want local_endpoint_v2", payload.Capabilities)
++	}
++	if payload.Transport != "npipe" || payload.InstanceID != "instance-1" {
++		t.Fatalf("endpoint metadata = transport %q instance %q", payload.Transport, payload.InstanceID)
++	}
++}
++
++func TestNewAPIServerRejectsNetworkEndpoint(t *testing.T) {
++	for _, endpoint := range []string{"tcp://127.0.0.1:9810", "ws://127.0.0.1:9810"} {
++		t.Run(endpoint, func(t *testing.T) {
++			api, err := NewAPIServerWithEndpoint(t.TempDir(), endpoint)
++			if err == nil {
++				api.Stop()
++				t.Fatalf("endpoint %q was accepted", endpoint)
++			}
++			if !strings.Contains(err.Error(), "local endpoint transport") {
++				t.Fatalf("error = %v", err)
++			}
++		})
++	}
+ }
+ 
+ type routeRecordingPlatform struct {
+@@ -213,6 +242,81 @@ func (p *routeRecordingPlatform) BindSessionRoute(key string) {
+ 	p.keys = append(p.keys, key)
+ }
+ 
++type rejectingWorkspaceAgent struct {
++	name string
++}
++
++func (a *rejectingWorkspaceAgent) Name() string { return a.name }
++func (a *rejectingWorkspaceAgent) StartSession(context.Context, string) (AgentSession, error) {
++	return &stubAgentSession{}, nil
++}
++func (a *rejectingWorkspaceAgent) ListSessions(context.Context) ([]AgentSessionInfo, error) {
++	return nil, nil
++}
++func (a *rejectingWorkspaceAgent) Stop() error { return nil }
++func (a *rejectingWorkspaceAgent) ValidateSessionID(context.Context, string) bool {
++	return false
++}
++
++func TestHandleBindAgentSessionRejectsBeforeRoutingMutation(t *testing.T) {
++	baseDir := t.TempDir()
++	workDir := filepath.Join(baseDir, "repo")
++	if err := os.Mkdir(workDir, 0o755); err != nil {
++		t.Fatal(err)
++	}
++	agentName := "rejecting-bind-agent"
++	RegisterAgent(agentName, func(map[string]any) (Agent, error) {
++		return &rejectingWorkspaceAgent{name: agentName}, nil
++	})
++	platform := &routeRecordingPlatform{
++		stubPlatformEngine: stubPlatformEngine{n: "feishu"},
++	}
++	engine := NewEngine(
++		"test",
++		&rejectingWorkspaceAgent{name: agentName},
++		[]Platform{platform},
++		filepath.Join(t.TempDir(), "sessions.json"),
++		LangEnglish,
++	)
++	engine.SetMultiWorkspace(baseDir, filepath.Join(t.TempDir(), "bindings.json"))
++	api := &APIServer{engines: map[string]*Engine{"test": engine}}
++	sessionKey := "feishu:oc_chat:ou_user"
++	body, err := json.Marshal(BindAgentSessionRequest{
++		Project: "test", SessionKey: sessionKey,
++		SessionID: "missing-session", SessionName: "invalid", WorkDir: workDir,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	rec := httptest.NewRecorder()
++	api.handleBindAgentSession(
++		rec,
++		httptest.NewRequest(
++			http.MethodPost,
++			"/sessions/bind-agent",
++			bytes.NewReader(body),
++		),
++	)
++
++	if rec.Code != http.StatusUnprocessableEntity {
++		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
++	}
++	if binding := engine.workspaceBindings.Lookup("project:test", "feishu:oc_chat"); binding != nil {
++		t.Fatalf("workspace binding mutated: %#v", binding)
++	}
++	_, sessions, err := engine.getOrCreateWorkspaceAgent(normalizeWorkspacePath(workDir))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := sessions.ListSessions(sessionKey); len(got) != 0 {
++		t.Fatalf("sessions mutated: %#v", got)
++	}
++	if len(platform.keys) != 0 {
++		t.Fatalf("routes mutated: %#v", platform.keys)
++	}
++}
++
+ func TestHandleBindAgentSessionRegistersPlatformRoute(t *testing.T) {
+ 	platform := &routeRecordingPlatform{stubPlatformEngine: stubPlatformEngine{n: "feishu"}}
+ 	engine := NewEngine("projectA", &stubAgent{}, []Platform{platform}, "", LangEnglish)
+diff --git a/core/api_unix.go b/core/api_unix.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..bd1918d68930f05fb36d7ddc1dcc185b8c9e3adc
+--- /dev/null
++++ b/core/api_unix.go
+@@ -0,0 +1,42 @@
++//go:build !windows
++
++package core
++
++import (
++	"fmt"
++	"net"
++	"os"
++	"path/filepath"
++	"strings"
++)
++
++func newLocalAPIListener(dataDir, endpoint string) (string, string, net.Listener, error) {
++	socketDir := filepath.Join(dataDir, "run")
++	if err := os.MkdirAll(socketDir, 0o755); err != nil {
++		return "", "", nil, fmt.Errorf("create run dir: %w", err)
++	}
++	socketPath := filepath.Join(socketDir, "api.sock")
++	if endpoint != "" {
++		if !strings.HasPrefix(endpoint, "unix://") {
++			return "", "", nil, fmt.Errorf("local endpoint transport is not supported on this platform")
++		}
++		socketPath = strings.TrimPrefix(endpoint, "unix://")
++	}
++	_ = os.Remove(socketPath)
++	listener, err := net.Listen("unix", socketPath)
++	if err != nil {
++		return "", "", nil, fmt.Errorf("listen unix socket: %w", err)
++	}
++	if err := os.Chmod(socketPath, 0o600); err != nil {
++		_ = listener.Close()
++		return "", "", nil, fmt.Errorf("chmod socket: %w", err)
++	}
++	return socketPath, "unix", listener, nil
++}
++
++func removeLocalAPIEndpoint(path string) error {
++	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
++		return err
++	}
++	return nil
++}
+diff --git a/core/api_windows.go b/core/api_windows.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..4462de47e5caac175eaf5f8ff63db68f3836534b
+--- /dev/null
++++ b/core/api_windows.go
+@@ -0,0 +1,45 @@
++//go:build windows
++
++package core
++
++import (
++	"crypto/sha256"
++	"fmt"
++	"net"
++	"os/user"
++	"strings"
++
++	winio "github.com/Microsoft/go-winio"
++)
++
++func newLocalAPIListener(_ string, endpoint string) (string, string, net.Listener, error) {
++	current, err := user.Current()
++	if err != nil {
++		return "", "", nil, fmt.Errorf("resolve current user: %w", err)
++	}
++	hash := sha256.Sum256([]byte(current.Uid))
++	pipePath := fmt.Sprintf(`\\.\pipe\cc-connect-api-%x`, hash[:8])
++	if endpoint != "" {
++		const prefix = "npipe://./pipe/"
++		if !strings.HasPrefix(endpoint, prefix) || strings.TrimPrefix(endpoint, prefix) == "" {
++			return "", "", nil, fmt.Errorf("invalid Windows named pipe endpoint")
++		}
++		pipePath = `\\.\pipe\` + strings.TrimPrefix(endpoint, prefix)
++	}
++	securityDescriptor := fmt.Sprintf(
++		"D:P(A;;GA;;;%s)(A;;GA;;;SY)(A;;GA;;;BA)",
++		current.Uid,
++	)
++	listener, err := winio.ListenPipe(pipePath, &winio.PipeConfig{
++		SecurityDescriptor: securityDescriptor,
++		MessageMode:        false,
++	})
++	if err != nil {
++		return "", "", nil, fmt.Errorf("listen named pipe: %w", err)
++	}
++	return pipePath, "npipe", listener, nil
++}
++
++func removeLocalAPIEndpoint(string) error {
++	return nil
++}
+diff --git a/core/api_windows_test.go b/core/api_windows_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..371c965dafa75072562d31ebec7901891b87d4e2
+--- /dev/null
++++ b/core/api_windows_test.go
+@@ -0,0 +1,150 @@
++//go:build windows
++
++package core
++
++import (
++	"context"
++	"crypto/sha256"
++	"encoding/json"
++	"fmt"
++	"net"
++	"net/http"
++	"os"
++	"os/user"
++	"testing"
++	"time"
++
++	winio "github.com/Microsoft/go-winio"
++	"golang.org/x/sys/windows"
++)
++
++func TestNewAPIServerUsesSIDDerivedDefaultNamedPipe(t *testing.T) {
++	current, err := user.Current()
++	if err != nil {
++		t.Fatal(err)
++	}
++	hash := sha256.Sum256([]byte(current.Uid))
++	want := fmt.Sprintf(`\\.\pipe\cc-connect-api-%x`, hash[:8])
++
++	api, err := NewAPIServer(t.TempDir())
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(api.Stop)
++	if got := api.SocketPath(); got != want {
++		t.Fatalf("SocketPath() = %q, want %q", got, want)
++	}
++}
++
++func TestNewAPIServerServesHTTPOverExplicitNamedPipe(t *testing.T) {
++	pipeName := fmt.Sprintf("cc-connect-api-test-%d", os.Getpid())
++	api, err := NewAPIServerWithEndpoint(
++		t.TempDir(), "npipe://./pipe/"+pipeName,
++	)
++	if err != nil {
++		t.Fatal(err)
++	}
++	api.Start()
++	t.Cleanup(api.Stop)
++
++	pipePath := api.SocketPath()
++	if want := `\\.\pipe\` + pipeName; pipePath != want {
++		t.Fatalf("pipe path = %q, want %q", pipePath, want)
++	}
++	transport := &http.Transport{
++		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
++			return winio.DialPipeContext(ctx, pipePath)
++		},
++	}
++	client := &http.Client{Transport: transport, Timeout: 10 * time.Second}
++
++	readMetadata := func() struct {
++		Capabilities []string `json:"capabilities"`
++		Transport    string   `json:"transport"`
++		InstanceID   string   `json:"instance_id"`
++	} {
++		response, err := client.Get("http://cc-connect/sessions/bind-agent")
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer response.Body.Close()
++		if response.StatusCode != http.StatusOK {
++			t.Fatalf("status = %d", response.StatusCode)
++		}
++		var payload struct {
++			Capabilities []string `json:"capabilities"`
++			Transport    string   `json:"transport"`
++			InstanceID   string   `json:"instance_id"`
++		}
++		if err := json.NewDecoder(response.Body).Decode(&payload); err != nil {
++			t.Fatal(err)
++		}
++		return payload
++	}
++
++	first := readMetadata()
++	second := readMetadata()
++	if first.Transport != "npipe" {
++		t.Fatalf("transport = %q", first.Transport)
++	}
++	if first.InstanceID == "" || second.InstanceID != first.InstanceID {
++		t.Fatalf("instance IDs = %q, %q", first.InstanceID, second.InstanceID)
++	}
++	found := false
++	for _, capability := range first.Capabilities {
++		if capability == "local_endpoint_v2" {
++			found = true
++		}
++	}
++	if !found {
++		t.Fatalf("capabilities = %#v", first.Capabilities)
++	}
++}
++
++func TestNewAPIServerNamedPipeDACLIsCurrentUserOnly(t *testing.T) {
++	pipeName := fmt.Sprintf("cc-connect-api-acl-%d", os.Getpid())
++	api, err := NewAPIServerWithEndpoint(
++		t.TempDir(), "npipe://./pipe/"+pipeName,
++	)
++	if err != nil {
++		t.Fatal(err)
++	}
++	api.Start()
++	t.Cleanup(api.Stop)
++
++	transport := &http.Transport{
++		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
++			return winio.DialPipeContext(ctx, api.SocketPath())
++		},
++	}
++	t.Cleanup(transport.CloseIdleConnections)
++	response, err := (&http.Client{
++		Transport: transport,
++		Timeout:   10 * time.Second,
++	}).Get("http://cc-connect/sessions/bind-agent")
++	if err != nil {
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { _ = response.Body.Close() })
++
++	descriptor, err := windows.GetNamedSecurityInfo(
++		api.SocketPath(),
++		windows.SE_FILE_OBJECT,
++		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
++	)
++	if err != nil {
++		t.Fatal(err)
++	}
++	current, err := user.Current()
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := fmt.Sprintf(
++		"O:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)",
++		current.Uid,
++		current.Uid,
++	)
++	if got := descriptor.String(); got != want {
++		t.Fatalf("pipe SDDL = %q, want %q", got, want)
++	}
++}
+diff --git a/core/claude_status_footer_test.go b/core/claude_status_footer_test.go
+index 23cc246f6b6bf0f792f7bd3d3a10a799ac9afd08..5560dcf53c328ed08832ae2a0b7597ad9aa76d14 100644
+--- a/core/claude_status_footer_test.go
++++ b/core/claude_status_footer_test.go
+@@ -259,6 +259,7 @@ func TestBuildReplyFooter_LegacyAllSegments(t *testing.T) {
+ func TestCompactReplyFooterPath_HomeRelativeDeepPathStaysFull(t *testing.T) {
+ 	homeDir := t.TempDir()
+ 	t.Setenv("HOME", homeDir)
++	t.Setenv("USERPROFILE", homeDir)
+ 
+ 	shortPath := filepath.Join(homeDir, "codes", "cc-connect")
+ 	if got, want := compactReplyFooterPath(shortPath), "~/codes/cc-connect"; got != want {
+diff --git a/daemon/windows_test.go b/daemon/windows_test.go
+index c7cdada82aa81d4a3c5bbffe14f5a998c2581cd1..55ee3be8100aa61f97b1affe7f3317c9b78648de 100644
+--- a/daemon/windows_test.go
++++ b/daemon/windows_test.go
+@@ -150,11 +150,9 @@ func TestBuildWindowsTaskScript_DropsEmptyValue(t *testing.T) {
+ 	}
+ }
+ 
+-// TestSchtasksInstall_TightensExistingScriptFrom0644 covers the upgrade
+-// path: os.WriteFile would truncate-in-place and keep the old POSIX
+-// mode of a script left by an earlier cc-connect version. While
+-// Windows real access is governed by ACLs, the POSIX bits are still
+-// expected to reflect intent.
++// TestSchtasksInstall_TightensExistingScriptFrom0644 covers replacing a
++// script left by an earlier cc-connect version. Windows access is governed by
++// ACLs, so this test verifies content replacement rather than POSIX mode bits.
+ func TestSchtasksInstall_TightensExistingScriptFrom0644(t *testing.T) {
+ 	t.Setenv("USERPROFILE", t.TempDir())
+ 
+@@ -169,10 +167,6 @@ func TestSchtasksInstall_TightensExistingScriptFrom0644(t *testing.T) {
+ 	if err := os.WriteFile(scriptPath, []byte("$env:OLD = 'leftover'\r\n"), 0o644); err != nil {
+ 		t.Fatalf("seed legacy script: %v", err)
+ 	}
+-	if info, _ := os.Stat(scriptPath); info.Mode().Perm() != 0o644 {
+-		t.Fatalf("precondition: seeded file mode = %o, want 0644", info.Mode().Perm())
+-	}
+-
+ 	mgr := &schtasksManager{}
+ 	cfg := Config{
+ 		BinaryPath: "C:\\cc.exe",
+@@ -185,11 +179,11 @@ func TestSchtasksInstall_TightensExistingScriptFrom0644(t *testing.T) {
+ 	if err := mgr.Install(cfg); err != nil {
+ 		t.Fatalf("Install: %v", err)
+ 	}
+-	info, err := os.Stat(scriptPath)
++	content, err := os.ReadFile(scriptPath)
+ 	if err != nil {
+-		t.Fatalf("stat: %v", err)
++		t.Fatalf("read installed script: %v", err)
+ 	}
+-	if info.Mode().Perm() != 0o600 {
+-		t.Errorf("script mode after reinstall = %o, want 0600", info.Mode().Perm())
++	if strings.Contains(string(content), "$env:OLD") {
++		t.Fatalf("installed script retained stale content:\n%s", content)
+ 	}
+ }
+diff --git a/go.mod b/go.mod
+index dd6d699eb72f3e0f8b7d8ada9600dc665b0550e7..c73a91e86370c2f852f8fd89e4be99aba6cfbc2e 100644
+--- a/go.mod
++++ b/go.mod
+@@ -4,6 +4,7 @@ go 1.25.0
+ 
+ require (
+ 	github.com/BurntSushi/toml v1.6.0
++	github.com/Microsoft/go-winio v0.6.2
+ 	github.com/bwmarrin/discordgo v0.29.0
+ 	github.com/charmbracelet/bubbles v1.0.0
+ 	github.com/charmbracelet/bubbletea v1.3.10
+@@ -18,6 +19,7 @@ require (
+ 	github.com/robfig/cron/v3 v3.0.1
+ 	github.com/slack-go/slack v0.16.0
+ 	github.com/stretchr/testify v1.11.1
++	golang.org/x/sys v0.43.0
+ 	maunium.net/go/mautrix v0.27.0
+ 	modernc.org/sqlite v1.49.1
+ 	rsc.io/qr v0.2.0
+@@ -64,7 +66,6 @@ require (
+ 	golang.org/x/crypto v0.50.0 // indirect
+ 	golang.org/x/exp v0.0.0-20260410095643-746e56fc9e2f // indirect
+ 	golang.org/x/net v0.53.0 // indirect
+-	golang.org/x/sys v0.43.0 // indirect
+ 	golang.org/x/term v0.42.0 // indirect
+ 	golang.org/x/text v0.36.0 // indirect
+ 	gopkg.in/yaml.v3 v3.0.1 // indirect
+diff --git a/go.sum b/go.sum
+index 6ec8b05740098832f24d871915d76dfbc6a0cbd3..4dbdb3dc58cd919c59fe9e8170a557855877fd9c 100644
+--- a/go.sum
++++ b/go.sum
+@@ -4,6 +4,8 @@ github.com/BurntSushi/toml v1.6.0 h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk
+ github.com/BurntSushi/toml v1.6.0/go.mod h1:ukJfTF/6rtPPRCnwkur4qwRxa8vTRFBF0uk2lLoLwho=
+ github.com/DATA-DOG/go-sqlmock v1.5.2 h1:OcvFkGmslmlZibjAjaHm3L//6LiuBgolP7OputlJIzU=
+ github.com/DATA-DOG/go-sqlmock v1.5.2/go.mod h1:88MAG/4G7SMwSE3CeA0ZKzrT5CiOU3OJ+JlNzwDqpNU=
++github.com/Microsoft/go-winio v0.6.2 h1:F2VQgta7ecxGYO8k3ZZz3RS8fVIXVxONVUPlNERoyfY=
++github.com/Microsoft/go-winio v0.6.2/go.mod h1:yd8OoFMLzJbo9gZq8j5qaps8bJ9aShtEA8Ipt1oGCvU=
+ github.com/aymanbagabas/go-osc52/v2 v2.0.1 h1:HwpRHbFMcZLEVr42D4p7XBqjyuxQH5SMiErDT4WkJ2k=
+ github.com/aymanbagabas/go-osc52/v2 v2.0.1/go.mod h1:uYgXzlJ7ZpABp8OJ+exZzJJhRNQ2ASbcXHWsFqH8hp8=
+ github.com/aymanbagabas/go-udiff v0.3.1 h1:LV+qyBQ2pqe0u42ZsUEtPiCaUoqgA9gYRDs3vj1nolY=

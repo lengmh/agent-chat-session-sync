@@ -20,9 +20,17 @@ Build and test the pinned cc-connect source with:
 ./scripts/build-cc-connect.sh
 ```
 
+On Windows 11 x64 with PowerShell 7 and Go 1.25.x:
+
+```powershell
+./scripts/build-cc-connect-windows.ps1
+```
+
 The script checks and applies every patch, runs the selected Go packages, and builds
-`dist/cc-connect`. Do not edit generated `.build/` or `dist/` files as the submitted
-source of a fix; update the corresponding patch under `patches/`.
+`dist/cc-connect` on Unix or `dist/cc-connect-windows-x64.exe` on Windows. The Windows
+script keeps its checkout, logs, and staging binary under the selected temporary root.
+Do not edit generated build or `dist/` files as the submitted source of a fix; update
+the corresponding patch under `patches/`.
 
 ## Pull requests
 

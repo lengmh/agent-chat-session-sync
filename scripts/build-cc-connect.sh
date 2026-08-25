@@ -17,6 +17,8 @@ git -C "$SOURCE_DIR" apply --check "$ROOT/patches/cc-connect-v1.4.1-binding-rout
 git -C "$SOURCE_DIR" apply "$ROOT/patches/cc-connect-v1.4.1-binding-routing.patch"
 git -C "$SOURCE_DIR" apply --check "$ROOT/patches/cc-connect-v1.4.1-rollout-refresh.patch"
 git -C "$SOURCE_DIR" apply "$ROOT/patches/cc-connect-v1.4.1-rollout-refresh.patch"
+git -C "$SOURCE_DIR" apply --check "$ROOT/patches/cc-connect-v1.4.1-windows-local-endpoint.patch"
+git -C "$SOURCE_DIR" apply "$ROOT/patches/cc-connect-v1.4.1-windows-local-endpoint.patch"
 mkdir -p "$(dirname -- "$OUTPUT")"
 # Upstream attachment CUJs leave asynchronous cleanup work that is flaky under
 # parallel package scheduling on macOS. A single test scheduler keeps the

@@ -4,9 +4,9 @@
 
 cc-connect normally learns an Agent session ID after a platform message starts the Agent. A local-first workflow has the opposite ordering: the Agent rollout already exists before the Feishu chat and cc-connect session key exist.
 
-The extension exposes cc-connect's existing `SessionManager.SwitchToAgentSession` operation through its local Unix-socket API. It does not add another session store or change normal platform-first behavior.
+The extension exposes cc-connect's existing `SessionManager.SwitchToAgentSession` operation through its local API. It does not add another session store or change normal platform-first behavior.
 
-The separate binding-routing patch adds `binding_routing = true` for Feishu projects sharing one Bot credential. A successful attach registers the chat only in the selected engine; the Python worker replays durable bindings after cc-connect restarts. `GET /sessions/bind-agent` reports the `attach_agent_session` and `binding_routing` capabilities without mutating state.
+The separate binding-routing patch adds `binding_routing = true` for Feishu projects sharing one Bot credential. A successful attach registers the chat only in the selected engine; the Python worker replays durable bindings after cc-connect restarts. `GET /sessions/bind-agent` reports the `attach_agent_session`, `binding_routing`, `external_session_refresh`, and `local_endpoint_v2` capabilities without mutating state. The same flat response includes `transport` (`unix` or `npipe`) and an opaque process-level `instance_id`.
 
 The patch also carries two independent Codex extensions:
 
@@ -35,11 +35,16 @@ Responses:
 - `409`: `work_dir` was supplied for a project not configured for multi-workspace.
 - `422`: the Agent adapter rejected the native session ID for the selected project.
 
-When `project` is empty, the handler only falls back automatically if exactly one engine is registered.
+When `project` is empty, the handler only falls back automatically if exactly one engine is registered. Validation completes before workspace binding, session, or route mutation.
 
 ## Security assumptions
 
-The API server is reachable only through cc-connect's mode-0600 Unix socket. Do not expose this route through a TCP reverse proxy. Validation must run before state mutation when the selected adapter implements `SessionIDValidator`.
+The API server is reachable only through a permission-protected local endpoint:
+
+- Unix uses a mode-0600 Unix socket.
+- Windows uses a byte-mode Named Pipe whose DACL grants access only to the current user, SYSTEM, and Administrators. Its default name is derived from the first 16 lowercase hexadecimal characters of the current user's SID SHA-256 digest.
+
+The optional top-level `internal_api_endpoint` accepts only `unix://` and `npipe://` endpoints. TCP and WebSocket endpoints are rejected; there is no network fallback. Do not expose this route through a TCP reverse proxy.
 
 Codex project options:
 
