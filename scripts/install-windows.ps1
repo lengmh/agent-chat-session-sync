@@ -43,12 +43,6 @@ if (-not $venvPath.StartsWith($statePrefix, [StringComparison]::OrdinalIgnoreCas
     throw "The dedicated venv must remain inside StateRoot: $StateRoot"
 }
 
-$requiredCommands = @(
-    @('uv', 'venv'),
-    @('uv', 'pip', 'install')
-)
-$null = $requiredCommands
-
 function Invoke-Checked {
     param(
         [Parameter(Mandatory)]

@@ -48,19 +48,6 @@ from .windows_configurator import (
 )
 
 
-class _ConfigureWindowsMode(argparse.Action):
-    def __call__(
-        self,
-        parser: argparse.ArgumentParser,
-        namespace: argparse.Namespace,
-        values: object,
-        option_string: str | None = None,
-    ) -> None:
-        apply = option_string == "--apply"
-        namespace.apply = apply
-        namespace.check = not apply
-
-
 def _windows_worker_task_checks(
     settings: Settings,
 ) -> list[tuple[str, bool, str]]:
@@ -567,18 +554,18 @@ def build_parser() -> argparse.ArgumentParser:
         "configure-windows",
         help="check or safely apply the Windows cc-connect configuration profile",
     )
-    configure_windows.set_defaults(check=True, apply=False)
+    configure_windows.set_defaults(apply=False)
     configure_mode = configure_windows.add_mutually_exclusive_group()
     configure_mode.add_argument(
         "--check",
-        nargs=0,
-        action=_ConfigureWindowsMode,
+        dest="apply",
+        action="store_false",
         help="show redacted configuration checks without writing files (default)",
     )
     configure_mode.add_argument(
         "--apply",
-        nargs=0,
-        action=_ConfigureWindowsMode,
+        dest="apply",
+        action="store_true",
         help="back up and apply only non-conflicting Windows configuration changes",
     )
     rename_projects = subparsers.add_parser(

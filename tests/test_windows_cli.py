@@ -24,11 +24,15 @@ class WindowsCLITests(unittest.TestCase):
     def test_configure_windows_defaults_to_redacted_check_mode(self) -> None:
         from agent_chat_session_sync import cli
 
-        args = cli.build_parser().parse_args(["configure-windows"])
+        parser = cli.build_parser()
+        default_args = parser.parse_args(["configure-windows"])
+        check_args = parser.parse_args(["configure-windows", "--check"])
+        apply_args = parser.parse_args(["configure-windows", "--apply"])
 
-        self.assertEqual(args.command, "configure-windows")
-        self.assertTrue(args.check)
-        self.assertFalse(args.apply)
+        self.assertEqual(default_args.command, "configure-windows")
+        self.assertFalse(default_args.apply)
+        self.assertFalse(check_args.apply)
+        self.assertTrue(apply_args.apply)
 
     def test_configure_windows_check_is_redacted_and_read_only(self) -> None:
         from agent_chat_session_sync import cli
@@ -214,8 +218,11 @@ app_secret = "super-secret"
                 LocalEndpoint("npipe", "./pipe/cc-connect-api-test"),
             )
             with mock.patch.object(cli, "CCConnectBridge") as bridge_type:
-                bridge_type.return_value.supports_attach.return_value = False
-                bridge_type.return_value.capabilities.return_value = set()
+                bridge_type.return_value.inspect.return_value = BridgeInfo(
+                    frozenset(),
+                    "npipe",
+                    "instance-1",
+                )
                 cli._doctor(settings)
 
             bridge_type.assert_called_once_with(settings.local_endpoint)

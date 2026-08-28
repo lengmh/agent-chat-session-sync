@@ -30,9 +30,15 @@ class WindowsPowerShellTests(unittest.TestCase):
         self.assertIn("staged-cc-connect.exe", script)
         self.assertIn("installed cc-connect SHA-256 mismatch", script)
         self.assertIn("installed Python package commit mismatch", script)
-        self.assertIn("'venv'", script)
-        self.assertIn("'uv', 'venv'", script)
-        self.assertIn("'uv', 'pip', 'install'", script)
+        self.assertIn("$uv = (Get-Command uv -ErrorAction Stop).Source", script)
+        self.assertIn(
+            "Invoke-Checked $uv @('venv', $stagedVenv, '--python', '3.11')",
+            script,
+        )
+        self.assertIn(
+            "Invoke-Checked $uv @(\n                'pip'\n                'install'",
+            script,
+        )
         self.assertIn("Python package and Windows configuration", script)
         self.assertIn("Codex and Claude Code Hooks", script)
         self.assertIn("worker Scheduled Task", script)

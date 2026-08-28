@@ -212,26 +212,6 @@ class CCConnectBridge:
             raise RuntimeError(f"cc-connect bind HTTP {status}: {text[:500]}")
         return json.loads(text)
 
-    def health_check(self) -> bool:
-        try:
-            self.inspect()
-            return True
-        except Exception:
-            return False
-
-    def supports_attach(self) -> bool:
-        """Probe the extension without creating or changing a binding."""
-        try:
-            return "attach_agent_session" in self.inspect().capabilities
-        except Exception:
-            return False
-
-    def capabilities(self) -> set[str]:
-        try:
-            return set(self.inspect().capabilities)
-        except Exception:
-            return set()
-
     def inspect(self) -> BridgeInfo:
         status, payload = self._request("GET", "/sessions/bind-agent")
         if status != 200:

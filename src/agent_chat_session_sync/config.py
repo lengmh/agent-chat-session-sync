@@ -8,6 +8,7 @@ from typing import Any
 
 from .endpoints import LocalEndpoint, windows_default_local_endpoint
 from .models import Project
+from .security import current_windows_user_sid_string
 
 
 @dataclass(frozen=True)
@@ -47,12 +48,9 @@ class Settings:
         if endpoint_value:
             endpoint = LocalEndpoint.parse(endpoint_value)
         elif os.name == "nt":
-            import win32security
-
-            from .security import _current_windows_user_sid
-
-            sid = win32security.ConvertSidToStringSid(_current_windows_user_sid())
-            endpoint = windows_default_local_endpoint(sid)
+            endpoint = windows_default_local_endpoint(
+                current_windows_user_sid_string()
+            )
         else:
             endpoint = None
         return cls(
