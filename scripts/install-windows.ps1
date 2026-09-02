@@ -18,6 +18,8 @@ param(
     [string]$CcConnectTarget,
     [string]$ExpectedCcConnectSha256,
     [switch]$RestartCcConnect,
+    [switch]$ExternalCcConnectLifecycle,
+    [switch]$CompleteExternalLifecycle,
     [string]$RollbackManifest
 )
 
@@ -173,6 +175,29 @@ function Get-CcConnectSnapshot {
     }
 }
 
+function Test-ExecutableRunning {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Target
+    )
+
+    $expectedTarget = [IO.Path]::GetFullPath($Target)
+    $processName = [IO.Path]::GetFileNameWithoutExtension($expectedTarget)
+    foreach ($process in @(Get-Process -Name $processName -ErrorAction SilentlyContinue)) {
+        try {
+            if (
+                [IO.Path]::GetFullPath([string]$process.Path) -eq
+                $expectedTarget
+            ) {
+                return $true
+            }
+        }
+        catch {
+        }
+    }
+    return $false
+}
+
 function Restore-Task {
     param(
         [Parameter(Mandatory)]
@@ -211,7 +236,8 @@ function Remove-ReplacementTask {
 function Rollback-Operation {
     param(
         [Parameter(Mandatory)]
-        [hashtable]$Context
+        [hashtable]$Context,
+        [switch]$ExternalLifecycle
     )
 
     $errors = [Collections.Generic.List[string]]::new()
@@ -221,7 +247,7 @@ function Rollback-Operation {
     $newBinaryNeedsRemoval = ([bool]$Context.binary_new_installed -or $binaryBackupAvailable -or -not [bool]$Context.binary_existed) -and $targetBinaryExists
     $binaryIntentProducedTarget = [bool]$Context.binary_intent -and -not [bool]$Context.binary_existed -and $targetBinaryExists
     $binaryRollbackNeeded = [bool]$Context.binary_new_installed -or [bool]$Context.binary_backup_moved -or $binaryBackupAvailable -or $binaryIntentProducedTarget
-    if ([bool]$Context.cc_connect_new_started) {
+    if ([bool]$Context.cc_connect_new_started -and -not $externalLifecycle) {
         try {
             Invoke-Checked $Context.cc_connect_target @('daemon', 'stop')
         }
@@ -243,7 +269,7 @@ function Rollback-Operation {
                     -Destination $Context.cc_connect_target `
                     -Force
             }
-            if ([bool]$Context.cc_connect_snapshot.running) {
+            if ([bool]$Context.cc_connect_snapshot.running -and -not $externalLifecycle) {
                 Invoke-Checked $Context.cc_connect_target @('daemon', 'start')
             }
         }
@@ -251,7 +277,11 @@ function Rollback-Operation {
             $errors.Add("cc-connect binary: $($_.Exception.Message)")
         }
     }
-    elseif ([bool]$Context.cc_connect_stopped -and [bool]$Context.cc_connect_snapshot.running) {
+    elseif (
+        [bool]$Context.cc_connect_stopped -and
+        [bool]$Context.cc_connect_snapshot.running -and
+        -not $externalLifecycle
+    ) {
         try {
             Invoke-Checked $Context.cc_connect_target @('daemon', 'start')
         }
@@ -403,6 +433,13 @@ function Assert-RollbackContext {
     }
 }
 
+if ($CompleteExternalLifecycle -and -not $RollbackManifest) {
+    throw 'CompleteExternalLifecycle requires RollbackManifest.'
+}
+if ($CompleteExternalLifecycle -and $ExternalCcConnectLifecycle) {
+    throw 'CompleteExternalLifecycle cannot be combined with ExternalCcConnectLifecycle.'
+}
+
 if ($RollbackManifest) {
     $manifestFile = [IO.Path]::GetFullPath($RollbackManifest)
     $backupRoot = [IO.Path]::GetFullPath((Join-Path $StateRoot 'backups'))
@@ -422,12 +459,72 @@ if ($RollbackManifest) {
         -ManifestFile $manifestFile `
         -StateRoot $StateRoot `
         -ExplicitCcConnectTarget $CcConnectTarget
+    $manifestLifecycle = [string]$rollbackContext.lifecycle_mode
+    if ($CompleteExternalLifecycle) {
+        if (
+            [string]$rollbackContext.lifecycle_mode -ne 'external' -or
+            [string]$rollbackContext.status -ne 'external_lifecycle_pending_doctor' -or
+            [string]$rollbackContext.doctor_status -notin @('deferred', 'failed') -or
+            -not [bool]$rollbackContext.doctor_required
+        ) {
+            throw 'RollbackManifest is not an external lifecycle pending-doctor operation.'
+        }
+        if (
+            [IO.Path]::GetFullPath(
+                [string]$rollbackContext.external_lifecycle_target
+            ) -ne [IO.Path]::GetFullPath($CcConnectTarget)
+        ) {
+            throw 'rollback manifest external_lifecycle_target does not match CcConnectTarget'
+        }
+        if (-not $PSCmdlet.ShouldProcess($manifestFile, 'Complete external lifecycle installation')) {
+            return
+        }
+        $externalDoctor = [string]$rollbackContext.acss_executable
+        $env:ACSS_DATA_DIR = $StateRoot
+        try {
+            if (-not (Test-Path -LiteralPath $externalDoctor -PathType Leaf)) {
+                throw "installed console script not found: $externalDoctor"
+            }
+            Invoke-Checked $externalDoctor @('doctor')
+        }
+        catch {
+            $rollbackContext.doctor_status = 'failed'
+            $rollbackContext.doctor_required = $true
+            $rollbackContext.external_lifecycle_last_attempt_at = [DateTime]::UtcNow.ToString('o')
+            Write-Manifest -Path $manifestFile -Manifest $rollbackContext
+            throw
+        }
+        $rollbackContext.status = 'applied'
+        $rollbackContext.doctor_status = 'passed'
+        $rollbackContext.doctor_required = $false
+        $rollbackContext.external_lifecycle_completed_at = [DateTime]::UtcNow.ToString('o')
+        Write-Manifest -Path $manifestFile -Manifest $rollbackContext
+        Write-Host "completed external lifecycle installation $manifestFile"
+        return
+    }
+    if ($manifestLifecycle -eq 'external' -and -not $ExternalCcConnectLifecycle) {
+        throw 'External lifecycle rollback requires ExternalCcConnectLifecycle.'
+    }
+    if ($ExternalCcConnectLifecycle) {
+        if ($manifestLifecycle -ne 'external') {
+            throw 'RollbackManifest is not an external lifecycle operation.'
+        }
+        if (
+            [IO.Path]::GetFullPath(
+                [string]$rollbackContext.external_lifecycle_target
+            ) -ne [IO.Path]::GetFullPath($CcConnectTarget)
+        ) {
+            throw 'rollback manifest external_lifecycle_target does not match CcConnectTarget'
+        }
+    }
     if (-not $PSCmdlet.ShouldProcess($manifestFile, 'Roll back installation')) {
         return
     }
     $rollbackContext.status = 'rolling_back'
     Write-Manifest -Path $manifestFile -Manifest $rollbackContext
-    $rollbackErrors = Rollback-Operation -Context $rollbackContext
+    $rollbackErrors = Rollback-Operation `
+        -Context $rollbackContext `
+        -ExternalLifecycle:$ExternalCcConnectLifecycle
     $rollbackContext.status = if ($rollbackErrors.Count) {
         'rollback_failed'
     }
@@ -511,6 +608,17 @@ if ($CcConnectBinary -or $CcConnectTarget -or $ExpectedCcConnectSha256) {
         'Replace cc-connect binary'
     )
 }
+if ($ExternalCcConnectLifecycle) {
+    if (-not $CcConnectBinary -or -not $CcConnectTarget -or -not $ExpectedCcConnectSha256) {
+        throw 'ExternalCcConnectLifecycle requires CcConnectBinary, CcConnectTarget, and ExpectedCcConnectSha256.'
+    }
+    if ($RestartCcConnect) {
+        throw 'ExternalCcConnectLifecycle cannot be used with RestartCcConnect.'
+    }
+    if (Test-ExecutableRunning -Target $CcConnectTarget) {
+        throw 'Stop cc-connect through its external lifecycle before replacing the binary.'
+    }
+}
 
 if (-not $doPython -and -not $doHooks -and -not $doTask -and -not $doBinary) {
     Write-Host 'No changes selected.'
@@ -531,6 +639,11 @@ $context = @{
     python_package_sha256 = $pythonPackageHash
     backup_dir = $backupDir
     status = 'snapshot'
+    lifecycle_mode = if ($ExternalCcConnectLifecycle) { 'external' } else { 'installer' }
+    doctor_status = 'not_run'
+    doctor_required = $false
+    doctor_deferred_reason = ''
+    external_lifecycle_target = ''
     files = @()
     task_snapshot = @{}
     task_changed = $false
@@ -750,8 +863,27 @@ try {
         }
     }
 
-    if ($doTask) {
+    if ($ExternalCcConnectLifecycle) {
+        $context.status = 'external_lifecycle_pending_doctor'
+        $context.doctor_status = 'deferred'
+        $context.doctor_required = $true
+        $context.doctor_deferred_reason = 'cc-connect must be started by its external lifecycle before doctor.'
+        $context.external_lifecycle_target = $CcConnectTarget
+        Write-Manifest -Path $manifestPath -Manifest $context
+        Write-Host 'cc-connect replacement is pending external lifecycle startup and doctor.'
+        Write-Host 'Start cc-connect through its external lifecycle, then run:'
+        Write-Host "& `"$PSCommandPath`" -StateRoot `"$StateRoot`" -CcConnectTarget `"$CcConnectTarget`" -RollbackManifest `"$manifestPath`" -CompleteExternalLifecycle -Confirm:`$false"
+        Write-Host 'If doctor fails, roll back with:'
+        Write-Host 'First stop cc-connect through its external lifecycle.'
+        Write-Host "& `"$PSCommandPath`" -StateRoot `"$StateRoot`" -CcConnectTarget `"$CcConnectTarget`" -RollbackManifest `"$manifestPath`" -ExternalCcConnectLifecycle -Confirm:`$false"
+        Write-Host "backup $backupDir"
+        return
+    }
+
+    if ($doTask -and -not $ExternalCcConnectLifecycle) {
         Invoke-Checked $context.acss_executable @('doctor')
+        $context.doctor_status = 'passed'
+        $context.doctor_required = $true
     }
     $context.status = 'applied'
     Write-Manifest -Path $manifestPath -Manifest $context
@@ -762,7 +894,9 @@ catch {
     $failure = $_
     $context.status = 'rolling_back'
     Write-Manifest -Path $manifestPath -Manifest $context
-    $rollbackErrors = Rollback-Operation -Context $context
+    $rollbackErrors = Rollback-Operation `
+        -Context $context `
+        -ExternalLifecycle:$ExternalCcConnectLifecycle
     $context.status = if ($rollbackErrors.Count) {
         'rollback_failed'
     }
