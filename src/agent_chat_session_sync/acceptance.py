@@ -37,10 +37,51 @@ class LiveAcceptance:
         keep_resources: bool = False,
         skip_reply: bool = False,
         agent_type: str = "codex",
+        project_name: str = "",
     ) -> AcceptanceResult:
+        config = load_cc_connect_config(self.settings.cc_config)
+        scoped_boundary: Path | None = None
+        if project_name:
+            project = next(
+                (
+                    item
+                    for item in config.get("projects", [])
+                    if str(item.get("name", "")) == project_name
+                ),
+                None,
+            )
+            if project is None:
+                raise RuntimeError(f"acceptance project not found: {project_name}")
+            configured_agent_type = str(
+                project.get("agent", {}).get("type", "codex")
+            ).lower()
+            if configured_agent_type != agent_type:
+                raise RuntimeError(
+                    f"acceptance project {project_name} belongs to "
+                    f"{configured_agent_type}, not {agent_type}"
+                )
+            options = project.get("agent", {}).get("options", {})
+            boundary_value = (
+                project.get("base_dir")
+                if str(project.get("mode", "")) == "multi-workspace"
+                else options.get("work_dir")
+            )
+            if not boundary_value:
+                raise RuntimeError(
+                    f"acceptance project {project_name} has no workspace boundary"
+                )
+            scoped_boundary = Path(str(boundary_value)).expanduser().resolve()
+            if not scoped_boundary.is_dir():
+                raise RuntimeError(
+                    f"acceptance project {project_name} workspace boundary does not exist"
+                )
         token = f"ACSS-E2E-{uuid.uuid4().hex[:10]}"
         reply_token = f"{token}-REPLY"
-        workspace = self.settings.data_dir / "acceptance" / token.lower()
+        workspace = (
+            scoped_boundary / ".agent-chat-session-sync-acceptance" / token.lower()
+            if scoped_boundary is not None
+            else self.settings.data_dir / "acceptance" / token.lower()
+        )
         workspace.mkdir(parents=True, exist_ok=False)
         (workspace / "README.md").write_text("agent-chat-session-sync live acceptance workspace\n", encoding="utf-8")
         subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)
@@ -90,10 +131,13 @@ class LiveAcceptance:
         if len(messages) < 2:
             raise RuntimeError(f"expected prompt and assistant outbox messages, got {len(messages)}")
 
-        config = load_cc_connect_config(self.settings.cc_config)
         project = matching_project(config, str(workspace), agent_type)
         if project is None:
             raise RuntimeError("acceptance workspace is not covered by cc-connect config")
+        if project_name and project.name != project_name:
+            raise RuntimeError(
+                f"acceptance workspace resolved to {project.name}, not {project_name}"
+            )
         platform = FeishuPlatform.from_options(project.platform_options)
         for item in messages:
             for message_id in item.platform_message_id.split(","):

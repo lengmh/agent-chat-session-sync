@@ -29,6 +29,11 @@ agent-chat-session-sync acceptance-live --agent codex --timeout 300
 agent-chat-session-sync acceptance-live --agent claudecode --timeout 300
 ```
 
+In a multi-project environment, add `--project <name>` to run one explicit
+project. The selected project must match `--agent`, and its configured workspace
+boundary contains the temporary acceptance workspace. Omitting `--project`
+preserves the legacy unscoped behavior.
+
 Windows 11 x64 Alpha candidate gate:
 
 ```powershell
@@ -71,6 +76,11 @@ $acss = Join-Path $env:LOCALAPPDATA 'agent-chat-session-sync\venv\Scripts\agent-
 & $acss acceptance-live --agent codex --timeout 300
 & $acss acceptance-live --agent claudecode --timeout 300
 ```
+
+For an explicit project scope, add `--project <name>` to either command. It
+verifies the selected project's Agent type and creates the temporary acceptance
+workspace beneath that project's configured workspace boundary; without it,
+the existing unscoped behavior remains unchanged.
 
 The Windows gate installs the candidate wheel and validates the candidate sdist
 and `cc-connect-windows-x64.exe` produced for the same clean commit. `doctor` must

@@ -218,6 +218,7 @@ Windows 10、ARM64、Windows SCM Service、跨用户共享以及 Windows 上的�
 macOS 继续使用 LaunchAgent 和 Unix Socket；Linux 核心代码可以手工运行，但在 systemd 安装器完成前不属于正式支持范围。
 同一个飞书 Bot 同时服务 Codex 与 Claude Code 时，两个项目必须启用 `binding_routing = true`；worker 会在 cc-connect
 启动或 `instance_id` 变化后，从 SQLite 重放 binding，使每个动态创建的群只进入所属 Agent engine。
+不同 project 也可以使用不同的飞书应用并保留各自凭据；这类独立 Bot 项目不需要 `binding_routing`。
 
 ## 架构
 
@@ -303,6 +304,9 @@ allow_from = "ou_xxx"
 group_reply_all = true
 binding_routing = true
 ```
+
+若 Claude Code 使用独立 Bot，应填写它自己的 `app_id` / `app_secret`，并省略
+`binding_routing`；只有多个 project 复用同一个 Bot 凭据时才需要该开关。
 
 本地优先同步建议使用 cc-connect 的 `multi-workspace` 模式，并把 `base_dir` 限定在已有工作区根目录。
 `configure-windows --apply` 只在现有 `work_dir` 边界内补齐 multi-workspace，不会自动扩大到整个磁盘。
@@ -520,6 +524,8 @@ agent-chat-session-sync acceptance-live --agent claudecode --timeout 900
 ```
 
 `acceptance-live` 默认要求在测试群发送指定 reply token，以证明飞书入站恢复了同一 rollout。
+在多项目环境中，可加 `--project <name>` 将一次验收固定到一个已配置 project；它会核验
+该项目与 `--agent` 一致，并在该项目的 workspace boundary 下创建临时目录。不传该选项时保持原有 unscoped 行为。
 `--skip-reply` 只是单向链路诊断，不算完整验收。详见 [docs/RELIABILITY.md](docs/RELIABILITY.md)
 和 [docs/ACCEPTANCE.md](docs/ACCEPTANCE.md)。
 

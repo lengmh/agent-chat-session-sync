@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+import subprocess
+import tempfile
 import unittest
+from unittest import mock
 
 from agent_chat_session_sync.acceptance import LiveAcceptance
 from agent_chat_session_sync.cli import build_parser
+from agent_chat_session_sync.config import Settings
 
 
 class AcceptanceTests(unittest.TestCase):
@@ -36,6 +41,128 @@ class AcceptanceTests(unittest.TestCase):
         self.assertEqual(args.timeout, 12)
         self.assertTrue(args.keep_resources)
         self.assertTrue(args.skip_reply)
+
+    def test_acceptance_cli_accepts_optional_project_scope(self) -> None:
+        args = build_parser().parse_args(
+            ["acceptance-live", "--agent", "claudecode", "--project", "playground_cc"]
+        )
+
+        self.assertEqual(args.agent, "claudecode")
+        self.assertEqual(args.project, "playground_cc")
+
+    def test_scoped_acceptance_rejects_project_for_other_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            config_path = root / "config.toml"
+            config_path.write_text(
+                f'''[[projects]]
+name = "playground_cc"
+mode = "multi-workspace"
+base_dir = "{workspace.as_posix()}"
+[projects.agent]
+type = "claudecode"
+[projects.agent.options]
+work_dir = "{workspace.as_posix()}"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "claude-app"
+app_secret = "claude-secret"
+allow_from = "ou_test"
+''',
+                encoding="utf-8",
+            )
+            settings = Settings(
+                data_dir=root / "data",
+                cc_config=config_path,
+                cc_socket=root / "api.sock",
+                codex_home=root / "codex",
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "belongs to claudecode"):
+                LiveAcceptance(settings, lambda _message: None).run(
+                    project_name="playground_cc",
+                    agent_type="codex",
+                )
+
+    def test_scoped_acceptance_starts_inside_selected_project_boundary(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            claude_workspace = root / "claude-workspace"
+            codex_workspace = root / "codex-workspace"
+            claude_workspace.mkdir()
+            codex_workspace.mkdir()
+            config_path = root / "config.toml"
+            config_path.write_text(
+                f'''[[projects]]
+name = "playground_cc"
+mode = "multi-workspace"
+base_dir = "{claude_workspace.as_posix()}"
+[projects.agent]
+type = "claudecode"
+[projects.agent.options]
+work_dir = "{claude_workspace.as_posix()}"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "claude-app"
+app_secret = "claude-secret"
+allow_from = "ou_test"
+
+[[projects]]
+name = "playground_codex"
+mode = "multi-workspace"
+base_dir = "{codex_workspace.as_posix()}"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "{codex_workspace.as_posix()}"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "codex-app"
+app_secret = "codex-secret"
+allow_from = "ou_test"
+''',
+                encoding="utf-8",
+            )
+            settings = Settings(
+                data_dir=root / "data",
+                cc_config=config_path,
+                cc_socket=root / "api.sock",
+                codex_home=root / "codex",
+            )
+            calls: list[tuple[list[str], Path]] = []
+
+            def run(command: list[str], *, cwd: Path, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+                calls.append((command, cwd))
+                return subprocess.CompletedProcess(
+                    command,
+                    0 if command[:2] == ["git", "init"] else 1,
+                    "",
+                    "expected test stop",
+                )
+
+            with mock.patch(
+                "agent_chat_session_sync.acceptance.subprocess.run",
+                side_effect=run,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "claudecode acceptance session failed",
+                ):
+                    LiveAcceptance(settings, lambda _message: None).run(
+                        project_name="playground_cc",
+                        agent_type="claudecode",
+                    )
+
+            self.assertEqual(len(calls), 2)
+            workspace = calls[0][1]
+            self.assertEqual(calls[1][1], workspace)
+            self.assertEqual(workspace.parent.parent, claude_workspace)
+            self.assertEqual(workspace.parent.name, ".agent-chat-session-sync-acceptance")
 
 
 if __name__ == "__main__":

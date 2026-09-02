@@ -207,8 +207,14 @@ def _ensure_section_key(block: str, header: str, key: str, value: Any) -> str:
     return before + separator + f"{key} = {_toml_value(value)}\n" + block[end:]
 
 
-def _enable_feishu_binding_routing(block: str) -> str:
+def _enable_feishu_binding_routing(block: str, app_ids: set[str]) -> str:
     def replace(match: re.Match[str]) -> str:
+        platform = tomllib.loads("[[projects]]\n" + match.group(0))["projects"][0][
+            "platforms"
+        ][0]
+        app_id = str(platform.get("options", {}).get("app_id", ""))
+        if app_id not in app_ids:
+            return match.group(0)
         body = match.group("body")
         if re.search(r"(?m)^\s*binding_routing\s*=", body):
             return match.group(0)
@@ -472,7 +478,6 @@ def plan_windows_configuration(
 
     managed: dict[str, tuple[dict[str, Any], Path, str]] = {}
     unsupported_project_names: set[str] = set()
-    app_ids: dict[str, str] = {}
     project_blocks: dict[str, str] = {}
     for match in PROJECT_BLOCK_RE.finditer(original):
         block = match.group(0)
@@ -534,7 +539,6 @@ def plan_windows_configuration(
         if boundary is None:
             continue
         managed[agent_type] = (project, boundary, name)
-        app_ids[agent_type] = str(platforms[0].get("options", {}).get("app_id", ""))
 
     if "codex" not in managed:
         checks.append(
@@ -561,17 +565,19 @@ def plan_windows_configuration(
                     "exactly one Feishu-backed claudecode project is required",
                 )
             )
-    if set(app_ids) == {"codex", "claudecode"} and (
-        not app_ids["codex"] or app_ids["codex"] != app_ids["claudecode"]
-    ):
-        checks.append(
-            WindowsConfigCheck(
-                "shared Feishu routing",
-                "conflict",
-                "Codex and Claude Code projects must use the same Feishu app",
-            )
-        )
-
+    app_projects: dict[str, set[str]] = {}
+    for project, _boundary, name in managed.values():
+        for platform in project.get("platforms", []):
+            if str(platform.get("type", "")).lower() != "feishu":
+                continue
+            app_id = str(platform.get("options", {}).get("app_id", ""))
+            if app_id:
+                app_projects.setdefault(app_id, set()).add(name)
+    shared_routing_app_ids = {
+        app_id
+        for app_id, project_names in app_projects.items()
+        if len(project_names) > 1
+    }
     for agent_type, (project, boundary, name) in managed.items():
         _field_check(
             checks,
@@ -608,14 +614,16 @@ def plan_windows_configuration(
             if str(platform.get("type", "")).lower() != "feishu":
                 continue
             options = platform.get("options", {})
-            _field_check(
-                checks,
-                project_name=name,
-                field="binding_routing",
-                current=options.get("binding_routing"),
-                present="binding_routing" in options,
-                desired=True,
-            )
+            app_id = str(options.get("app_id", ""))
+            if app_id in shared_routing_app_ids:
+                _field_check(
+                    checks,
+                    project_name=name,
+                    field="binding_routing",
+                    current=options.get("binding_routing"),
+                    present="binding_routing" in options,
+                    desired=True,
+                )
         if agent_type == "codex":
             options = project.get("agent", {}).get("options", {})
             for legacy in ("sandbox", "approval_policy", "approvalPolicy"):
@@ -669,7 +677,7 @@ def plan_windows_configuration(
             "workspace_init_allow_local_paths",
             True,
         )
-        block = _enable_feishu_binding_routing(block)
+        block = _enable_feishu_binding_routing(block, shared_routing_app_ids)
         if agent_type == "codex":
             block = _ensure_agent_options_section(block)
             for field, value in CODEX_MANAGED_OPTIONS.items():

@@ -132,6 +132,112 @@ app_secret = "super-secret"
             self.assertTrue(claude["platforms"][0]["options"]["binding_routing"])
             self.assertEqual(path.read_text(encoding="utf-8").count("super-secret"), 2)
 
+    def test_check_allows_independent_feishu_apps(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            path = root / "config.toml"
+            path.write_text(
+                f'''[[projects]]
+name = "local-codex"
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "{workspace.as_posix()}"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "codex-app"
+app_secret = "codex-secret"
+
+[[projects]]
+name = "local-claude"
+[projects.agent]
+type = "claudecode"
+[projects.agent.options]
+work_dir = "{workspace.as_posix()}"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "claude-app"
+app_secret = "claude-secret"
+''',
+                encoding="utf-8",
+            )
+
+            plan = plan_windows_configuration(path)
+
+            report = "\n".join(plan.report_lines())
+            self.assertFalse(plan.has_conflicts, report)
+            self.assertNotIn("shared Feishu routing", report)
+            updated = tomllib.loads(plan.updated_text)
+            codex, claude = updated["projects"]
+            self.assertEqual(codex["platforms"][0]["options"]["app_id"], "codex-app")
+            self.assertEqual(claude["platforms"][0]["options"]["app_id"], "claude-app")
+            self.assertEqual(
+                codex["platforms"][0]["options"]["app_secret"],
+                "codex-secret",
+            )
+            self.assertEqual(
+                claude["platforms"][0]["options"]["app_secret"],
+                "claude-secret",
+            )
+
+    def test_check_does_not_enable_shared_routing_for_independent_apps(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            path = root / "config.toml"
+            path.write_text(
+                f'''internal_api_endpoint = "npipe://./pipe/cc-connect-api-test"
+
+[[projects]]
+name = "local-codex"
+mode = "multi-workspace"
+base_dir = "{workspace.as_posix()}"
+workspace_init_allow_local_paths = true
+[projects.agent]
+type = "codex"
+[projects.agent.options]
+work_dir = "{workspace.as_posix()}"
+backend = "app_server"
+app_server_lifecycle = "stdio"
+app_server_url = "stdio://"
+permission_profile = "cc-connect-workspace"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "codex-app"
+app_secret = "codex-secret"
+
+[[projects]]
+name = "local-claude"
+mode = "multi-workspace"
+base_dir = "{workspace.as_posix()}"
+workspace_init_allow_local_paths = true
+[projects.agent]
+type = "claudecode"
+[projects.agent.options]
+work_dir = "{workspace.as_posix()}"
+[[projects.platforms]]
+type = "feishu"
+[projects.platforms.options]
+app_id = "claude-app"
+app_secret = "claude-secret"
+''',
+                encoding="utf-8",
+            )
+
+            plan = plan_windows_configuration(path)
+
+            report = "\n".join(plan.report_lines())
+            self.assertFalse(plan.has_conflicts, report)
+            self.assertFalse(plan.has_changes, report)
+            self.assertNotIn("binding_routing", report)
+            self.assertNotIn("binding_routing", plan.updated_text)
+
     def test_check_can_add_claude_project_with_existing_workspace_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)

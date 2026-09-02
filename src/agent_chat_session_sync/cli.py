@@ -537,6 +537,11 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--claude-settings-file", type=Path)
     acceptance = subparsers.add_parser("acceptance-live", help="run the real Agent/Hook/Feishu acceptance flow")
     acceptance.add_argument("--agent", choices=("codex", "claudecode"), default="codex")
+    acceptance.add_argument(
+        "--project",
+        default="",
+        help="run the acceptance flow only through this configured Agent project",
+    )
     acceptance.add_argument("--timeout", type=float, default=300)
     acceptance.add_argument("--keep-resources", action="store_true")
     acceptance.add_argument(
@@ -638,6 +643,7 @@ def main(argv: list[str] | None = None) -> int:
             keep_resources=args.keep_resources,
             skip_reply=args.skip_reply,
             agent_type=args.agent,
+            project_name=args.project,
         )
         print(json.dumps(result.__dict__, ensure_ascii=False, sort_keys=True))
         if args.skip_reply:
