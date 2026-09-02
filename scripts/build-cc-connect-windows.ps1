@@ -63,6 +63,7 @@ if ($BuildCommit -notmatch '^[0-9a-fA-F]{40}$') {
 }
 $BuildCommit = $BuildCommit.ToLowerInvariant()
 $binaryProvenance = "acss:$BuildCommit;upstream:$revision"
+$gitUnixBin = Join-Path (Split-Path (Split-Path $git -Parent) -Parent) 'usr\bin'
 
 function Invoke-Checked {
     param(
@@ -79,8 +80,15 @@ function Invoke-Checked {
 }
 
 $oldGoMaxProcs = $env:GOMAXPROCS
+$oldPath = $env:PATH
 Start-Transcript -Path $logPath | Out-Null
 try {
+    if (Test-Path -LiteralPath $gitUnixBin -PathType Container) {
+        $pathEntries = @($env:PATH -split [IO.Path]::PathSeparator)
+        if ($pathEntries -notcontains $gitUnixBin) {
+            $env:PATH = "$gitUnixBin$([IO.Path]::PathSeparator)$env:PATH"
+        }
+    }
     $goVersion = & $go version
     if ($LASTEXITCODE -ne 0) {
         throw "$go exited with code $LASTEXITCODE"
@@ -147,6 +155,12 @@ finally {
     }
     else {
         $env:GOMAXPROCS = $oldGoMaxProcs
+    }
+    if ($null -eq $oldPath) {
+        Remove-Item Env:PATH -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:PATH = $oldPath
     }
     Stop-Transcript | Out-Null
 }
