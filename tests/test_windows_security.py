@@ -12,6 +12,38 @@ from agent_chat_session_sync.security import ensure_private_directory, harden_pr
 
 @unittest.skipUnless(os.name == "nt", "Windows DACL contract")
 class WindowsSecurityTests(unittest.TestCase):
+    def _checks_for_inherited_file_owner(self, owner: object):
+        import win32security
+
+        with tempfile.TemporaryDirectory() as raw:
+            parent = Path(raw) / "data"
+            ensure_private_directory(parent)
+            target = parent / "events.sqlite3-wal"
+            target.touch()
+            get_security = win32security.GetNamedSecurityInfo
+            descriptor = get_security(
+                str(target),
+                win32security.SE_FILE_OBJECT,
+                win32security.OWNER_SECURITY_INFORMATION
+                | win32security.DACL_SECURITY_INFORMATION,
+            )
+            descriptor.SetSecurityDescriptorOwner(owner, False)
+
+            def get_named_security_info(
+                path: str,
+                object_type: int,
+                security_info: int,
+            ):
+                if Path(path) == target:
+                    return descriptor
+                return get_security(path, object_type, security_info)
+
+            with mock.patch(
+                "win32security.GetNamedSecurityInfo",
+                side_effect=get_named_security_info,
+            ):
+                return private_path_security_checks("SQLite WAL", target)
+
     def test_private_directory_replaces_unsafe_inherited_dacl(self) -> None:
         import ntsecuritycon
         import win32api
@@ -191,6 +223,33 @@ class WindowsSecurityTests(unittest.TestCase):
             checks = private_path_security_checks("SQLite WAL", target)
 
         self.assertTrue(all(check.okay for check in checks), checks)
+
+    def test_private_path_audit_accepts_trusted_owner_for_inherited_file(
+        self,
+    ) -> None:
+        import win32security
+
+        for owner_type in (
+            win32security.WinLocalSystemSid,
+            win32security.WinBuiltinAdministratorsSid,
+        ):
+            with self.subTest(owner_type=owner_type):
+                owner = win32security.CreateWellKnownSid(owner_type, None)
+                checks = self._checks_for_inherited_file_owner(owner)
+                self.assertTrue(all(check.okay for check in checks), checks)
+
+    def test_private_path_audit_rejects_untrusted_owner_for_inherited_file(
+        self,
+    ) -> None:
+        import win32security
+
+        owner = win32security.CreateWellKnownSid(win32security.WinWorldSid, None)
+        checks = self._checks_for_inherited_file_owner(owner)
+
+        self.assertEqual(
+            {check.name for check in checks if not check.okay},
+            {"SQLite WAL owner"},
+        )
 
     def test_private_path_audit_fails_closed_when_security_descriptor_is_unreadable(
         self,

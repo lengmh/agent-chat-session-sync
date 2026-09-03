@@ -1,6 +1,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -109,14 +110,25 @@ class InstallerTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "nt", "Windows console-script quoting contract")
     def test_generated_hook_command_executes_from_a_path_with_spaces(self) -> None:
-        executable = installed_executable()
-        self.assertIsNotNone(executable)
-        self.assertIn(" ", str(executable), "test environment must exercise a spaced executable path")
+        installed = installed_executable()
+        self.assertIsNotNone(installed)
         with tempfile.TemporaryDirectory() as directory:
+            executable = Path(directory) / "ACSS Test Environment" / Path(installed).name
+            executable.parent.mkdir()
+            shutil.copy2(installed, executable)
             environment = dict(os.environ)
-            environment["ACSS_DATA_DIR"] = directory
+            environment["ACSS_DATA_DIR"] = str(Path(directory) / "data")
+            python = executable.parent / "python.exe"
+            with mock.patch(
+                "agent_chat_session_sync.installer.sys.executable",
+                str(python),
+            ), mock.patch(
+                "agent_chat_session_sync.installer.shutil.which",
+                return_value=None,
+            ):
+                command = hook_command("codex")
             receipt = subprocess.run(
-                hook_command("codex"),
+                command,
                 input=json.dumps({"hook_event_name": "Stop", "session_id": "windows-hook"}),
                 text=True,
                 capture_output=True,
@@ -124,7 +136,7 @@ class InstallerTests(unittest.TestCase):
                 check=False,
             )
             status = subprocess.run(
-                [str(executable), "events", "--limit", "1"],
+                [executable, "events", "--limit", "1"],
                 text=True,
                 capture_output=True,
                 env=environment,

@@ -123,15 +123,17 @@ def _audit_windows_private_path(path: Path) -> list[tuple[str, bool, str]]:
         | win32security.DACL_SECURITY_INFORMATION,
     )
     current_user = _current_windows_user_sid()
+    current_user_sid = str(current_user)
     expected_sids = {
         str(sid) for sid in _windows_private_sids(current_user)
     }
     owner = descriptor.GetSecurityDescriptorOwner()
+    owner_sid = str(owner)
     dacl = descriptor.GetSecurityDescriptorDacl()
     control, _revision = descriptor.GetSecurityDescriptorControl()
     if dacl is None:
         return [
-            ("owner", str(owner) == str(current_user), "owner=current-user"),
+            ("owner", owner_sid == current_user_sid, "owner=current-user"),
             ("principals", False, "DACL is missing"),
             ("access", False, "DACL is missing"),
             ("inheritance", False, "DACL is missing"),
@@ -152,6 +154,8 @@ def _audit_windows_private_path(path: Path) -> list[tuple[str, bool, str]]:
         inheritance_ok = protected and all(
             entry[0][1] == expected_flags for entry in allowed_entries
         )
+        owner_ok = owner_sid == current_user_sid
+        owner_detail = "owner=current-user"
     else:
         explicit_ok = protected and all(
             entry[0][1] == 0 for entry in allowed_entries
@@ -165,8 +169,16 @@ def _audit_windows_private_path(path: Path) -> list[tuple[str, bool, str]]:
             and all(okay for _suffix, okay, _detail in audit_private_path(path.parent))
         )
         inheritance_ok = explicit_ok or inherited_ok
+        owner_ok = owner_sid == current_user_sid or (
+            inherited_ok and owner_sid in expected_sids
+        )
+        owner_detail = (
+            "expected current user, SYSTEM, or Administrators for safely inherited file"
+            if inherited_ok
+            else "owner=current-user"
+        )
     return [
-        ("owner", str(owner) == str(current_user), "owner=current-user"),
+        ("owner", owner_ok, owner_detail),
         (
             "principals",
             len(entries) == len(allowed_entries) == 3

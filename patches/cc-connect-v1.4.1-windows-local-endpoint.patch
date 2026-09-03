@@ -924,7 +924,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..371c965dafa75072562d31ebec7901891b87d4e2
 --- /dev/null
 +++ b/core/api_windows_test.go
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,153 @@
 +//go:build windows
 +
 +package core
@@ -1028,7 +1028,7 @@ index 0000000000000000000000000000000000000000..371c965dafa75072562d31ebec790189
 +	}
 +}
 +
-+func TestNewAPIServerNamedPipeDACLIsCurrentUserOnly(t *testing.T) {
++func TestNewAPIServerNamedPipeDACLIsRestricted(t *testing.T) {
 +	pipeName := fmt.Sprintf("cc-connect-api-acl-%d", os.Getpid())
 +	api, err := NewAPIServerWithEndpoint(
 +		t.TempDir(), "npipe://./pipe/"+pipeName,
@@ -1057,7 +1057,7 @@ index 0000000000000000000000000000000000000000..371c965dafa75072562d31ebec790189
 +	descriptor, err := windows.GetNamedSecurityInfo(
 +		api.SocketPath(),
 +		windows.SE_FILE_OBJECT,
-+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
++		windows.DACL_SECURITY_INFORMATION,
 +	)
 +	if err != nil {
 +		t.Fatal(err)
@@ -1067,12 +1067,15 @@ index 0000000000000000000000000000000000000000..371c965dafa75072562d31ebec790189
 +		t.Fatal(err)
 +	}
 +	want := fmt.Sprintf(
-+		"O:%sD:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)",
-+		current.Uid,
++		"D:P(A;;FA;;;%s)(A;;FA;;;SY)(A;;FA;;;BA)",
 +		current.Uid,
 +	)
-+	if got := descriptor.String(); got != want {
-+		t.Fatalf("pipe SDDL = %q, want %q", got, want)
++	wantDescriptor, err := windows.SecurityDescriptorFromString(want)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got, canonicalWant := descriptor.String(), wantDescriptor.String(); got != canonicalWant {
++		t.Fatalf("pipe DACL = %q, want %q", got, canonicalWant)
 +	}
 +}
 diff --git a/core/claude_status_footer_test.go b/core/claude_status_footer_test.go

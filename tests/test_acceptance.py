@@ -90,7 +90,10 @@ allow_from = "ou_test"
     def test_scoped_acceptance_starts_inside_selected_project_boundary(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            claude_workspace = root / "claude-workspace"
+            # Keep a lexical alias so this assertion checks filesystem identity.
+            workspace_alias = root / "workspace-alias"
+            workspace_alias.mkdir()
+            claude_workspace = workspace_alias / ".." / "claude-workspace"
             codex_workspace = root / "codex-workspace"
             claude_workspace.mkdir()
             codex_workspace.mkdir()
@@ -161,7 +164,7 @@ allow_from = "ou_test"
             self.assertEqual(len(calls), 2)
             workspace = calls[0][1]
             self.assertEqual(calls[1][1], workspace)
-            self.assertEqual(workspace.parent.parent, claude_workspace)
+            self.assertTrue(workspace.parent.parent.samefile(claude_workspace))
             self.assertEqual(workspace.parent.name, ".agent-chat-session-sync-acceptance")
 
 
