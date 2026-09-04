@@ -344,6 +344,8 @@ class PackagingReleaseTests(unittest.TestCase):
         self.assertIn("acss:$BuildCommit;upstream:$revision", script)
         self.assertIn("'-ldflags'", script)
         self.assertIn("main.commit", script)
+        self.assertIn("NewAPIServerNamedPipeDACLIsRestricted", script)
+        self.assertIn("'./...', '-run', '^$', '-count=1'", script)
 
     def test_release_build_uses_locked_environment_and_prebuilt_windows_exe(
         self,

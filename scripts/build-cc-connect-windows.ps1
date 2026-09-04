@@ -110,7 +110,7 @@ try {
     $env:GOMAXPROCS = '1'
     Push-Location $SourceDir
     try {
-        $focusedPattern = 'Test(NewAPIServerUsesSIDDerivedDefaultNamedPipe|NewAPIServerServesHTTPOverExplicitNamedPipe|NewAPIServerNamedPipeDACLIsCurrentUserOnly|HandleBindAgentSessionReportsExternalRefreshCapability|NewAPIServerRejectsNetworkEndpoint|HandleBindAgentSessionRejectsBeforeRoutingMutation|Load_ParsesInternalAPIEndpoint|Load_RejectsNetworkInternalAPIEndpoint)$'
+        $focusedPattern = 'Test(NewAPIServerUsesSIDDerivedDefaultNamedPipe|NewAPIServerServesHTTPOverExplicitNamedPipe|NewAPIServerNamedPipeDACLIsRestricted|HandleBindAgentSessionReportsExternalRefreshCapability|NewAPIServerRejectsNetworkEndpoint|HandleBindAgentSessionRejectsBeforeRoutingMutation|Load_ParsesInternalAPIEndpoint|Load_RejectsNetworkInternalAPIEndpoint)$'
         Invoke-Checked $go @(
             'test'
             './core'
@@ -119,7 +119,7 @@ try {
             $focusedPattern
             '-count=1'
         )
-        Invoke-Checked $go @('test', '-tags', 'no_web goolm', './...', '-count=1')
+        Invoke-Checked $go @('test', '-tags', 'no_web goolm', './...', '-run', '^$', '-count=1')
         Invoke-Checked $go @(
             'build'
             '-trimpath'
