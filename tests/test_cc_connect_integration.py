@@ -99,15 +99,11 @@ class PatchedCCConnectIntegrationTests(unittest.TestCase):
                     self.fail(
                         f"patched listener helper did not become ready: {ready!r}; {stderr}"
                     )
-                self.assertTrue(
-                    all(
-                        check.okay
-                        for check in local_endpoint_security_checks(
-                            "cc-connect endpoint",
-                            endpoint,
-                        )
-                    )
+                checks = local_endpoint_security_checks(
+                    "cc-connect endpoint",
+                    endpoint,
                 )
+                self.assertTrue(all(check.okay for check in checks), checks)
                 bridge = CCConnectBridge(endpoint)
                 info = bridge.inspect()
                 self.assertEqual(info.transport, "npipe")

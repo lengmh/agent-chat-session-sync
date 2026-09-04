@@ -62,7 +62,7 @@ class PermissionConfigTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == "nt", "Windows Named Pipe security contract")
 class NamedPipeSecurityTests(unittest.TestCase):
-    def test_restricted_named_pipe_dacl_passes(self) -> None:
+    def test_restricted_named_pipe_dacl_accepts_only_trusted_owners(self) -> None:
         import ntsecuritycon
         import win32security
 
@@ -82,23 +82,44 @@ class NamedPipeSecurityTests(unittest.TestCase):
                 sid,
             )
         descriptor = mock.Mock()
-        descriptor.GetSecurityDescriptorOwner.return_value = current
         descriptor.GetSecurityDescriptorDacl.return_value = dacl
         descriptor.GetSecurityDescriptorControl.return_value = (
             win32security.SE_DACL_PROTECTED,
             1,
         )
 
-        with mock.patch(
-            "win32security.GetNamedSecurityInfo",
-            return_value=descriptor,
-        ) as get_security:
-            checks = local_endpoint_security_checks(
-                "cc-connect endpoint",
-                LocalEndpoint("npipe", "./pipe/cc-connect-api-test"),
-            )
+        trusted_owners = _windows_private_sids(current)
+        untrusted_owner = win32security.CreateWellKnownSid(
+            win32security.WinWorldSid,
+            None,
+        )
+        for owner, expected in (
+            *((trusted_owner, True) for trusted_owner in trusted_owners),
+            (untrusted_owner, False),
+        ):
+            with self.subTest(owner=str(owner)):
+                descriptor.GetSecurityDescriptorOwner.return_value = owner
+                with mock.patch(
+                    "win32security.GetNamedSecurityInfo",
+                    return_value=descriptor,
+                ) as get_security:
+                    checks = local_endpoint_security_checks(
+                        "cc-connect endpoint",
+                        LocalEndpoint("npipe", "./pipe/cc-connect-api-test"),
+                    )
 
-        self.assertTrue(all(check.okay for check in checks), checks)
+                owner_check = next(
+                    check for check in checks if check.name.endswith(" owner")
+                )
+                self.assertEqual(owner_check.okay, expected, checks)
+                self.assertTrue(
+                    all(
+                        check.okay
+                        for check in checks
+                        if check is not owner_check
+                    ),
+                    checks,
+                )
         self.assertEqual(
             get_security.call_args.args[0],
             r"\\.\pipe\cc-connect-api-test",

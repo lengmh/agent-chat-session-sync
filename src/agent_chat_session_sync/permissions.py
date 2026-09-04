@@ -130,13 +130,18 @@ def local_endpoint_security_checks(
             str(sid) for sid in _windows_private_sids(current_user)
         }
         owner = descriptor.GetSecurityDescriptorOwner()
+        owner_ok = str(owner) in expected_sids
         dacl = descriptor.GetSecurityDescriptorDacl()
         control, _revision = descriptor.GetSecurityDescriptorControl()
     except Exception as exc:
         return [SecurityCheck(f"{name} ACL", False, f"{pipe_path}: {exc}")]
     if dacl is None:
         return [
-            SecurityCheck(f"{name} owner", str(owner) == str(current_user), "owner=current-user"),
+            SecurityCheck(
+                f"{name} owner",
+                owner_ok,
+                "expected current user, SYSTEM, or Administrators",
+            ),
             SecurityCheck(f"{name} principals", False, "DACL is missing"),
             SecurityCheck(f"{name} access", False, "DACL is missing"),
             SecurityCheck(f"{name} inheritance", False, "DACL is missing"),
@@ -152,8 +157,8 @@ def local_endpoint_security_checks(
     return [
         SecurityCheck(
             f"{name} owner",
-            str(owner) == str(current_user),
-            "expected current user",
+            owner_ok,
+            "expected current user, SYSTEM, or Administrators",
         ),
         SecurityCheck(
             f"{name} principals",
